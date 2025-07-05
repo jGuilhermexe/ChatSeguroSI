@@ -1,79 +1,77 @@
 import sqlite3
 from datetime import datetime
+from contextlib import closing
 
 DB_PATH = "chat.db"
 
-# ---------- inicializa estrutura do banco ---------- #
+def _get_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+# Criação das tabelas do banco de dados
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    # Tabela de usuários
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            nome TEXT PRIMARY KEY
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS users (
+                   username TEXT PRIMARY KEY
+               )"""
         )
-    """)
+        conn.commit()
 
-    # Tabela de mensagens offline
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mensagens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            remetente TEXT NOT NULL,
-            destinatario TEXT NOT NULL,
-            texto TEXT NOT NULL,
-            timestamp TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+# Adicionando usuários a tabela
+def add_user(username: str):
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (username,))
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS messages_{username} (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender     TEXT    NOT NULL,
+                timestamp  TEXT    NOT NULL,
+                text       TEXT    NOT NULL
+            )
+        """)
+        conn.commit()
 
-# ---------- adiciona novo usuário (se ainda não existir) ---------- #
-def add_user(nome: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO usuarios (nome) VALUES (?)", (nome,))
-    conn.commit()
-    conn.close()
+# Listando usuários 
+def list_users() -> list[str]:
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute("SELECT username FROM users ORDER BY username")
+        return [row[0] for row in cur.fetchall()]
 
-# ---------- lista todos os usuários registrados ---------- #
-def list_users():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT nome FROM usuarios")
-    nomes = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return nomes
+# Salvando mensagens em quanto os usuários estão offline
+def store_offline(sender: str, recipient: str, text: str):
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute(f"""
+            INSERT INTO messages_{recipient} (sender, timestamp, text)
+            VALUES (?, ?, ?)
+        """, (sender, datetime.now().isoformat(timespec="seconds"), text))
+        conn.commit()
 
-# ---------- armazena mensagem offline ---------- #
-def store_offline(remetente: str, destinatario: str, texto: str):
-    ts = datetime.now().isoformat(timespec='seconds')
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO mensagens (remetente, destinatario, texto, timestamp)
-        VALUES (?, ?, ?, ?)
-    """, (remetente, destinatario, texto, ts))
-    conn.commit()
-    conn.close()
+def fetch_offline(recipient: str) -> list[tuple[str, str, str]]:
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute(f"""
+            SELECT id, sender, timestamp, text FROM messages_{recipient} ORDER BY id
+        """)
+        rows = cur.fetchall()
+        ids = [row[0] for row in rows]
+        if ids:
+            cur.execute(f"""
+                DELETE FROM messages_{recipient} WHERE id IN ({','.join('?'*len(ids))})
+            """, ids)
+            conn.commit()
+        return [(row[1], row[2], row[3]) for row in rows]
 
-# ---------- busca e remove mensagens offline para um destinatário ---------- #
-def fetch_offline(destinatario: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
 
-    # Busca mensagens
-    cur.execute("""
-        SELECT remetente, timestamp, texto
-        FROM mensagens
-        WHERE destinatario = ?
-        ORDER BY timestamp ASC
-    """, (destinatario,))
-    mensagens = cur.fetchall()
-
-    # Apaga mensagens entregues
-    cur.execute("DELETE FROM mensagens WHERE destinatario = ?", (destinatario,))
-    conn.commit()
-    conn.close()
-
-    return mensagens
+ # Armazenar todo o histórico de mensagens no chat   
+def store_message(recipient: str, sender: str, timestamp: str, text: str):
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute(f"""
+            INSERT INTO messages_{recipient} (sender, timestamp, text)
+            VALUES (?, ?, ?)
+        """, (sender, timestamp, text))
+        conn.commit()
+def fetch_all_messages(recipient: str) -> list[tuple[str, str, str]]:
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute(f"""
+            SELECT sender, timestamp, text FROM messages_{recipient} ORDER BY id
+        """)
+        return cur.fetchall()
