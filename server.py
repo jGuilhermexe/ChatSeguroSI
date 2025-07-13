@@ -2,12 +2,11 @@ from socket import socket, AF_INET, SOCK_STREAM
 from threading import Thread
 from datetime import datetime
 import database as db
+from struct import unpack
 
 # ---------------
 #  SERVIDOR CHAT
 # ---------------
-#  Agora persiste usuários e mensagens offline em SQLite (chat.db)
-# --------------------------------------------------------------
 
 class Servidor:
     def __init__(self, host='0.0.0.0', port=12345):
@@ -19,18 +18,6 @@ class Servidor:
 
         # inicializa BD
         db.init_db()
-
-    # Alteração no método para criação do banco de dados para incluir a chave pública
-    def init_db():
-        with _get_conn() as conn, closing(conn.cursor()) as cur:
-            cur.execute(
-                """CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    public_key BLOB
-                )"""
-            )
-            conn.commit()
-        
 
     # ---------- utilidades internas ---------- #
     def _broadcast_status(self, username: str, status: str):
@@ -58,56 +45,77 @@ class Servidor:
     # ---------- thread por cliente ---------- #
     def handle_client(self, client_socket):
         """Lida com a conexão de um cliente individual."""
-        client_name = None # Inicializa o nome do cliente
-    # Loop de autenticação
-        while True:
-            try:
-                temp_name = client_socket.recv(1024).decode('utf-8').strip()
-                if not temp_name:
-                    client_socket.close()
-                    return
+        client_name = None
 
-                if temp_name in self.clients:
-                    client_socket.send("Nome já conectado. Tente outro.".encode('utf-8'))
-                    continue
+        # --- LOOP DE AUTENTICAÇÃO ---
+        try:
+            # 1. Recebe o nome até encontrar quebra de linha
+            temp_name = ""
+            while not temp_name.endswith("\n"):
+                temp_name += client_socket.recv(1).decode('utf-8')
+            client_name = temp_name.strip()
 
-                client_name = temp_name
-                 # Recebendo a chave pública do cliente
-                public_key = client_socket.recv(4096)
-
-                db.add_user(client_name, public_key)  # Adiciona o usuário e a chave pública
-
-                self.clients[client_name] = client_socket
-                client_socket.send("Nome aceito".encode('utf-8'))
-                print(f"[*] Cliente {client_name} conectado")
-                break
-            except ConnectionResetError:
-                print("[*] Cliente desconectou antes de logar.")
+            if not client_name:
                 client_socket.close()
                 return
 
+            if client_name in self.clients:
+                client_socket.send("Nome já conectado. Tente outro.".encode('utf-8'))
+                return
+            if db.username_exists(temp_name):
+                client_socket.send("Nome já registrado. Use outro nome.".encode('utf-8'))
+                client_socket.close()
+                return
 
-        # --- Fluxo pós-autenticação ---
-        
-        # 1. Envia a lista de contatos completa
+            # 2. Recebe 4 bytes indicando o tamanho da chave pública
+            key_size_bytes = client_socket.recv(4)
+            if len(key_size_bytes) < 4:
+                client_socket.close()
+                return
+            key_size = int.from_bytes(key_size_bytes, byteorder='big')
+
+            # 3. Recebe exatamente key_size bytes da chave pública
+            public_key = b''
+            while len(public_key) < key_size:
+                chunk = client_socket.recv(key_size - len(public_key))
+                if not chunk:
+                    client_socket.close()
+                    return
+                public_key += chunk
+
+            # 4. Armazena no banco
+            db.add_user(client_name, public_key)
+
+            # 5. Aceita conexão
+            self.clients[client_name] = client_socket
+            client_socket.send("Nome aceito".encode('utf-8'))
+            print(f"[*] Cliente {client_name} conectado")
+
+        except Exception as e:
+            print(f"[!] Erro durante autenticação de cliente: {e}")
+            client_socket.close()
+            return
+
+        # --- FLUXO PÓS-AUTENTICAÇÃO ---
+
+        # Envia lista de contatos
         self._send_contacts(client_socket)
-        
-        # 2. Envia as mensagens que estavam offline
+
+        # Envia mensagens offline
         self._deliver_all_history(client_name, client_socket)
 
-        #    Avisa ao novo cliente quem já está online.
+        # Avisa ao cliente quem já está online
         for user in self.clients:
-            if user != client_name: # Para cada outro usuário que já está online...
+            if user != client_name:
                 try:
-                    # ...envia o status "ONLINE" para o cliente que acabou de conectar.
                     client_socket.send(f"STATUS:{user}:ONLINE".encode('utf-8'))
-                except Exception as e:
-                    print(f"[!] Erro ao enviar status de {user} para {client_name}: {e}")
+                except Exception:
+                    pass
 
-        # 4. Avisa a todos (inclusive ao novo cliente) que ele ficou online.
+        # Avisa a todos que ele está online
         self._broadcast_status(client_name, "ONLINE")
 
-        # Loop de recebimento de mensagens
+        # Loop de recebimento
         while True:
             try:
                 data = client_socket.recv(4096).decode('utf-8')
@@ -117,16 +125,12 @@ class Servidor:
                 if data.startswith("MSG:"):
                     _, dest, msg = data.split(":", 2)
                     timestamp = datetime.now().isoformat(timespec='seconds')
-
-                    # ✅ Sempre armazena a mensagem no banco, independentemente do status
                     db.store_message(dest, client_name, timestamp, msg)
 
                     if dest in self.clients:
                         self.clients[dest].send(f"CHAT:{client_name}:{timestamp}:{msg}".encode('utf-8'))
                     else:
                         client_socket.send(f"SYSTEM:{dest} está offline. Mensagem armazenada.".encode('utf-8'))
-
-
 
                 elif data.startswith("TYPING:"):
                     _, dest = data.split(":", 1)
@@ -142,6 +146,7 @@ class Servidor:
                 self._broadcast_status(client_name, "OFFLINE")
                 client_socket.close()
                 break
+
 
     # ---------- loop principal ---------- #
     def start(self):

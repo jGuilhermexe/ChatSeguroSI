@@ -4,6 +4,9 @@ from threading import Thread
 import sys
 import queue
 from PIL import Image
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 # -----------------------------------------------------
 #  CLIENTE GRÁFICO PARA CHAT PRIVADO (Estilo Hamachi)
@@ -15,6 +18,29 @@ from PIL import Image
 # • Notificação de "digitando..."
 # • Contador de mensagens não lidas
 # -----------------------------------------------------
+
+
+# Função para gerar par de chaves RSA, colocando antes da classChatClient pra evitar qualquer tipo de conflito.
+def generate_rsa_keys():
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend()
+    )
+        
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+        )
+        
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        
+    return private_pem, public_pem
 
 class ChatClient:
     """Lógica de Rede do Cliente (Refatorada)"""
@@ -28,12 +54,16 @@ class ChatClient:
         try:
             self.sock.connect((host, port))
             print("[*] Conectado ao servidor.")
-        
-            self.sock.send(username.encode('utf-8'))
-            self.sock.send(public_key)  # Envia a chave pública junto com o nome
-        
+
+            # Envia o nome + quebra de linha
+            self.sock.sendall((username + "\n").encode('utf-8'))
+
+            # Envia o tamanho da chave + chave
+            self.sock.sendall(len(public_key).to_bytes(4, byteorder='big'))
+            self.sock.sendall(public_key)
+
             response = self.sock.recv(1024).decode('utf-8')
-        
+
             if response == "Nome aceito":
                 self.app.on_login_success()
                 Thread(target=self._receive_loop, daemon=True).start()
@@ -205,56 +235,6 @@ class ChatApp(ctk.CTk):
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives import serialization
 
-# Função para gerar par de chaves RSA
-    def generate_rsa_keys():
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-            backend=default_backend()
-        )
-        
-        private_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        public_key = private_key.public_key()
-        public_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        return private_pem, public_pem
-
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.backends import default_backend
-
-# Função para gerar par de chaves RSA
-    def generate_rsa_keys():
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-            backend=default_backend()
-        )
-        
-        private_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        
-        public_key = private_key.public_key()
-        public_pem = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        return private_pem, public_pem
-
-
-
     # --- Lógica de Eventos e Navegação ---
     
     def attempt_login(self):
@@ -271,6 +251,19 @@ class ChatApp(ctk.CTk):
 
         # Gerar as chaves RSA
         private_key, public_key = generate_rsa_keys()
+        # --- Função pra salvar a chave privada localmente
+        try:
+            filename = f"chaves/{user}_private_key.pem"
+
+            with open(filename, "wb") as f:
+                f.write(private_key)
+            print(f"[+] Chave privada salva em: {filename}")
+        except Exception as e:
+            print(f"[!] Erro ao salvar chave privada: {e}")
+            self.login_status_label.configure(text="Erro ao salvar chave privada.")
+            self.connect_button.configure(state="normal", text="Conectar")
+            return
+        # ------------------------------------------------
 
         # Enviar a chave pública ao servidor junto com o nome de usuário
         Thread(target=self.client_logic.connect, args=(self.host, self.port, self.username, public_key), daemon=True).start()

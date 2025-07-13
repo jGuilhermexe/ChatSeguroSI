@@ -12,7 +12,8 @@ def init_db():
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """CREATE TABLE IF NOT EXISTS users (
-                   username TEXT PRIMARY KEY
+                   username TEXT PRIMARY KEY,
+                   public_key BLOB
                )"""
         )
         conn.commit()
@@ -61,6 +62,11 @@ def fetch_offline(recipient: str) -> list[tuple[str, str, str]]:
             """, ids)
             conn.commit()
         return [(row[1], row[2], row[3]) for row in rows]
+
+def username_exists(username: str) -> bool:
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+        return cur.fetchone() is not None
 
 
  # Armazenar todo o histórico de mensagens no chat   
