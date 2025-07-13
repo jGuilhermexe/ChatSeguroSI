@@ -20,6 +20,18 @@ class Servidor:
         # inicializa BD
         db.init_db()
 
+    # Alteração no método para criação do banco de dados para incluir a chave pública
+    def init_db():
+        with _get_conn() as conn, closing(conn.cursor()) as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    public_key BLOB
+                )"""
+            )
+            conn.commit()
+        
+
     # ---------- utilidades internas ---------- #
     def _broadcast_status(self, username: str, status: str):
         """Envia atualização de status para todos os clientes online."""
@@ -47,7 +59,7 @@ class Servidor:
     def handle_client(self, client_socket):
         """Lida com a conexão de um cliente individual."""
         client_name = None # Inicializa o nome do cliente
-        # Loop de autenticação
+    # Loop de autenticação
         while True:
             try:
                 temp_name = client_socket.recv(1024).decode('utf-8').strip()
@@ -60,16 +72,20 @@ class Servidor:
                     continue
 
                 client_name = temp_name
-                db.add_user(client_name)
+                 # Recebendo a chave pública do cliente
+                public_key = client_socket.recv(4096)
+
+                db.add_user(client_name, public_key)  # Adiciona o usuário e a chave pública
 
                 self.clients[client_name] = client_socket
                 client_socket.send("Nome aceito".encode('utf-8'))
                 print(f"[*] Cliente {client_name} conectado")
-                break # Sai do loop de autenticação
+                break
             except ConnectionResetError:
                 print("[*] Cliente desconectou antes de logar.")
                 client_socket.close()
                 return
+
 
         # --- Fluxo pós-autenticação ---
         
@@ -139,6 +155,12 @@ class Servidor:
             client_socket, addr = server.accept()
             print(f"[*] Conexão aceita de {addr}")
             Thread(target=self.handle_client, args=(client_socket,), daemon=True).start()
+
+     
+
+        
+
+    
 
 
 if __name__ == "__main__":

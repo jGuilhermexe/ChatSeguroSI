@@ -24,14 +24,16 @@ class ChatClient:
         self.buffer = ""
         self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:"]
 
-    def connect(self, host, port, username):
+    def connect(self, host, port, username, public_key):
         try:
             self.sock.connect((host, port))
             print("[*] Conectado ao servidor.")
-            
+        
             self.sock.send(username.encode('utf-8'))
+            self.sock.send(public_key)  # Envia a chave pública junto com o nome
+        
             response = self.sock.recv(1024).decode('utf-8')
-            
+        
             if response == "Nome aceito":
                 self.app.on_login_success()
                 Thread(target=self._receive_loop, daemon=True).start()
@@ -44,6 +46,7 @@ class ChatClient:
         except Exception as e:
             self.app.on_login_fail(f"Erro ao conectar: {e}")
             return False
+
 
     def send_message(self, recipient, message):
         try:
@@ -199,6 +202,58 @@ class ChatApp(ctk.CTk):
         send_button = ctk.CTkButton(message_entry_frame, text="Enviar", width=80, command=self.send_chat_message)
         send_button.pack(side="right", padx=(10, 0))
 
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+
+# Função para gerar par de chaves RSA
+    def generate_rsa_keys():
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        
+        public_key = private_key.public_key()
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        
+        return private_pem, public_pem
+
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+# Função para gerar par de chaves RSA
+    def generate_rsa_keys():
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        
+        public_key = private_key.public_key()
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        
+        return private_pem, public_pem
+
+
 
     # --- Lógica de Eventos e Navegação ---
     
@@ -213,8 +268,14 @@ class ChatApp(ctk.CTk):
         self.host = server
         self.connect_button.configure(state="disabled", text="Conectando...")
         self.login_status_label.configure(text="")
-        
-        Thread(target=self.client_logic.connect, args=(self.host, self.port, self.username), daemon=True).start()
+
+        # Gerar as chaves RSA
+        private_key, public_key = generate_rsa_keys()
+
+        # Enviar a chave pública ao servidor junto com o nome de usuário
+        Thread(target=self.client_logic.connect, args=(self.host, self.port, self.username, public_key), daemon=True).start()
+
+
 
     def on_login_success(self):
         print("[*] Login bem-sucedido.")

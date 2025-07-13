@@ -18,9 +18,10 @@ def init_db():
         conn.commit()
 
 # Adicionando usuários a tabela
-def add_user(username: str):
+# Adicionando usuários à tabela, agora com a chave pública
+def add_user(username: str, public_key: bytes):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
-        cur.execute("INSERT OR IGNORE INTO users (username) VALUES (?)", (username,))
+        cur.execute("INSERT OR IGNORE INTO users (username, public_key) VALUES (?, ?)", (username, public_key))
         cur.execute(f"""
             CREATE TABLE IF NOT EXISTS messages_{username} (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,6 +31,7 @@ def add_user(username: str):
             )
         """)
         conn.commit()
+
 
 # Listando usuários 
 def list_users() -> list[str]:
