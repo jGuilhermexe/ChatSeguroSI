@@ -3,23 +3,31 @@ from threading import Thread
 from datetime import datetime
 import database as db
 from struct import unpack
+import os
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
-# ---------------
-#  SERVIDOR CHAT
-# ---------------
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SERVER.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#  Parte responsável do código por ser o servidor da nossa plataforma! =D
+
+
+#  ~~~~~~~~~~~~~~~~  Função para criar o nonce ~~~~~~~~~~~~~~~~~~~~
+def gerar_nonce(tamanho=32):
+    return os.urandom(tamanho)
+
 
 class Servidor:
     def __init__(self, host='0.0.0.0', port=12345):
         self.host = host
         self.port = port
 
-        # {nome: socket} – apenas usuários ONLINE
+        #~~~~~~~~~~~~~~~~~~~  {nome: socket} – apenas usuários ONLINE ~~~~~~~~~~~~~~~~~~
         self.clients = {}
 
-        # inicializa BD
+        # ~~~~~~~~~~~~~~~~~ inicializa o Banco de Dados ~~~~~~~~~~~~~~~~~~
         db.init_db()
 
-    # ---------- utilidades internas ---------- #
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ UTILIDADES INTERNAS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def _broadcast_status(self, username: str, status: str):
         """Envia atualização de status para todos os clientes online."""
         for sock in self.clients.values():
@@ -42,14 +50,14 @@ class Servidor:
         except Exception as e:
             print(f"[!] Erro ao carregar histórico de {username}: {e}")
 
-    # ---------- thread por cliente ---------- #
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~ THREAD POR CLIENTE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def handle_client(self, client_socket):
         """Lida com a conexão de um cliente individual."""
         client_name = None
 
-        # --- LOOP DE AUTENTICAÇÃO ---
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOOP DE AUTENTICAÇÃO ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         try:
-            # 1. Recebe o nome até encontrar quebra de linha
+            # ~~~~~~~~~~~~  1. Recebe o nome até encontrar quebra de linha ~~~~~~~~~~~~~~
             temp_name = ""
             while not temp_name.endswith("\n"):
                 temp_name += client_socket.recv(1).decode('utf-8')
@@ -62,49 +70,89 @@ class Servidor:
             if client_name in self.clients:
                 client_socket.send("Nome já conectado. Tente outro.".encode('utf-8'))
                 return
-            if db.username_exists(temp_name):
-                client_socket.send("Nome já registrado. Use outro nome.".encode('utf-8'))
-                client_socket.close()
-                return
 
-            # 2. Recebe 4 bytes indicando o tamanho da chave pública
-            key_size_bytes = client_socket.recv(4)
-            if len(key_size_bytes) < 4:
-                client_socket.close()
-                return
-            key_size = int.from_bytes(key_size_bytes, byteorder='big')
+            if db.username_exists(client_name): # ~~~~~~~~~~~~ Se o usuário existir ~~~~~~~~~~~~~~~~~~
+                print(f"[*] Usuário '{client_name}' existe. Iniciando autenticação com nonce.")
+                client_socket.send(b"L")  # ~~~~~~~~~~~~~~~~~ Identifica que é login (Inicia a autenticação) ~~~~~~~~~~~~~~~~~~~~
 
-            # 3. Recebe exatamente key_size bytes da chave pública
-            public_key = b''
-            while len(public_key) < key_size:
-                chunk = client_socket.recv(key_size - len(public_key))
-                if not chunk:
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ AUTENTICAÇÃO ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                #  ~~~~~~~~~~~~~ 1. Função pra buscar a chave publica no banco de dados ~~~~~~~~~~~~~~~~~~~~
+                print("[*] Buscando chave pública no banco de dados.")
+                public_key_bytes = db.get_public_key(client_name)
+                public_key = serialization.load_pem_public_key(public_key_bytes)
+
+                # ~~~~~~~~~~~~~ 2. Função pra gerar e enviar o nonce ~~~~~~~~~~~~~~~~
+                nonce = gerar_nonce()
+                print(f"[*] Nonce gerado (tamanho {len(nonce)} bytes). Enviando para o cliente.")
+                client_socket.send(len(nonce).to_bytes(2, byteorder='big') + nonce)
+
+                # ~~~~~~~~~~~~~~~~~~ 3. Recebe a assinatura do nonce (tamanho + conteúdo) ~~~~~~~~~~~~~~~~~~~~
+                assinatura_len_bytes = client_socket.recv(2)
+                assinatura_len = int.from_bytes(assinatura_len_bytes, byteorder='big')
+                assinatura = client_socket.recv(assinatura_len)
+                print(f"[*] Assinatura recebida ({assinatura_len} bytes). Verificando...")
+
+                # ~~~~~~~~~~~~~~~~~~~~~~~ 4. Verifica a assinatura ~~~~~~~~~~~~~~~~~~~~~~~~~~
+                try:
+                    public_key.verify(
+                        assinatura,
+                        nonce,
+                        padding.PKCS1v15(),
+                        hashes.SHA256()
+                    )
+                    # ~~~~~~~~~~~~~~~~~~~ Se funcionar, entra corretamente ~~~~~~~~~~~~~~~~~~~~~~
+                    print("[+] Assinatura válida! Usuário autenticado com sucesso.")
+                    client_socket.send("Nome aceito".encode('utf-8'))
+                    self.clients[client_name] = client_socket
+                    print(f"[*] Cliente {client_name} autenticado e conectado")
+                except Exception:
+                    client_socket.send("Assinatura inválida. Conexão negada.".encode('utf-8'))
                     client_socket.close()
                     return
-                public_key += chunk
 
-            # 4. Armazena no banco
-            db.add_user(client_name, public_key)
+            else:
+                print(f"[*] Usuário '{client_name}' não existe. Registrando novo usuário.")
+                client_socket.send(b"R")
+                # ~~~~~~~~~~~~~~~~~ 1. Recebe 4 bytes indicando o tamanho da chave pública ~~~~~~~~~~~~~~~~~~~~
+                key_size_bytes = client_socket.recv(4)
+                if len(key_size_bytes) < 4:
+                    client_socket.close()
+                    return
+                key_size = int.from_bytes(key_size_bytes, byteorder='big')
 
-            # 5. Aceita conexão
-            self.clients[client_name] = client_socket
-            client_socket.send("Nome aceito".encode('utf-8'))
-            print(f"[*] Cliente {client_name} conectado")
+                # ~~~~~~~~~~~~~~~~~~~~~~  2. Recebe exatamente key_size bytes da chave pública ~~~~~~~~~~~~~~~~~~~~~~~~
+                print(f"[*] Recebendo chave pública do cliente ({key_size} bytes).")
+                public_key = b''
+                while len(public_key) < key_size:
+                    chunk = client_socket.recv(key_size - len(public_key))
+                    if not chunk:
+                        client_socket.close()
+                        return
+                    public_key += chunk
+
+                # ~~~~~~~~~~~~~~~ 3. Armazena no banco ~~~~~~~~~~~~~~~~~~~~~~~~
+                print("[*] Salvando chave pública no banco de dados.")
+                db.add_user(client_name, public_key)
+
+                # ~~~~~~~~~~~~~~~~ 4. Aceita conexão ~~~~~~~~~~~~~~~~~~~~~~~~
+                self.clients[client_name] = client_socket
+                client_socket.send("Nome aceito".encode('utf-8'))
+                print(f"[*] Cliente {client_name} registrado e conectado")
 
         except Exception as e:
-            print(f"[!] Erro durante autenticação de cliente: {e}")
+            print(f"[!] Erro durante autenticação/registro: {e}")
             client_socket.close()
             return
 
-        # --- FLUXO PÓS-AUTENTICAÇÃO ---
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FLUXO PÓS AUTENTICAÇÃO ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-        # Envia lista de contatos
+        # ~~~~~~~~~~~~~~~~~~ Envia lista de contatos ~~~~~~~~~~~~~~~~~~~~~~~~
         self._send_contacts(client_socket)
 
-        # Envia mensagens offline
+        # ~~~~~~~~~~~~~~~~~~~ Envia as mensagens enviadas em quanto o usuário estava offline ~~~~~~~~~~~~~~~~~~~~
         self._deliver_all_history(client_name, client_socket)
 
-        # Avisa ao cliente quem já está online
+        # ~~~~~~~~~~~~~~~~~~~~  Avisa ao cliente quem já está online ~~~~~~~~~~~~~~~~~~~~
         for user in self.clients:
             if user != client_name:
                 try:
@@ -112,10 +160,10 @@ class Servidor:
                 except Exception:
                     pass
 
-        # Avisa a todos que ele está online
+        # ~~~~~~~~~~~~~~~~~~~ Avisa a todos que ele está online ~~~~~~~~~~~~~~~~~~~~~~~~
         self._broadcast_status(client_name, "ONLINE")
 
-        # Loop de recebimento
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Loop de recebimento ~~~~~~~~~~~~~~~~~~~~~~~~~~
         while True:
             try:
                 data = client_socket.recv(4096).decode('utf-8')
@@ -148,7 +196,7 @@ class Servidor:
                 break
 
 
-    # ---------- loop principal ---------- #
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOOP PRINCIPAL ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def start(self):
         """Inicia o servidor e aguarda por conexões."""
         server = socket(AF_INET, SOCK_STREAM)
@@ -160,13 +208,6 @@ class Servidor:
             client_socket, addr = server.accept()
             print(f"[*] Conexão aceita de {addr}")
             Thread(target=self.handle_client, args=(client_socket,), daemon=True).start()
-
-     
-
-        
-
-    
-
 
 if __name__ == "__main__":
     Servidor().start()

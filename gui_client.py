@@ -7,17 +7,13 @@ from PIL import Image
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+import os
 
-# -----------------------------------------------------
-#  CLIENTE GRÁFICO PARA CHAT PRIVADO (Estilo Hamachi)
-# -----------------------------------------------------
-# • Interface moderna com customtkinter
-# • Tela de Login
-# • Tela principal com lista de contatos e status (Online/Offline)
-# • Tela de chat privado para cada contato
-# • Notificação de "digitando..."
-# • Contador de mensagens não lidas
-# -----------------------------------------------------
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GUI_CLIENT.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Essa parte do código é responsável pelo design da interface gráfica e também da lógica.
 
 
 # Função para gerar par de chaves RSA, colocando antes da classChatClient pra evitar qualquer tipo de conflito.
@@ -42,6 +38,7 @@ def generate_rsa_keys():
         
     return private_pem, public_pem
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA: A classe ChatClient é responsável pela lógica da conexão da rede ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatClient:
     """Lógica de Rede do Cliente (Refatorada)"""
     def __init__(self, app_controller):
@@ -50,18 +47,54 @@ class ChatClient:
         self.buffer = ""
         self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:"]
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função de conexão da plataforma ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
     def connect(self, host, port, username, public_key):
         try:
+            print("[*] Conectando ao servidor...")
             self.sock.connect((host, port))
             print("[*] Conectado ao servidor.")
 
-            # Envia o nome + quebra de linha
+            print("[*] Enviando nome de usuário ao servidor.")
             self.sock.sendall((username + "\n").encode('utf-8'))
 
-            # Envia o tamanho da chave + chave
-            self.sock.sendall(len(public_key).to_bytes(4, byteorder='big'))
-            self.sock.sendall(public_key)
+            tipo_conexao = self.sock.recv(1)
+            if not tipo_conexao:
+                self.app.on_login_fail("Falha ao se comunicar com o servidor.")
+                return False
 
+            if tipo_conexao == b"L":
+               # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FUNÇÃO RESPONSÁVEL PELO LOGIN NA PALTAFORMA ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                nonce_len = int.from_bytes(self.sock.recv(2), byteorder='big')
+                nonce = self.sock.recv(nonce_len)
+
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Faz o carregamento da chave privada ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                try:
+                    with open(f"chaves/{username}_private_key.pem", "rb") as f:
+                        private_key = serialization.load_pem_private_key(
+                            f.read(),
+                            password=None,
+                            backend=default_backend()
+                        )
+                except Exception as e:
+                    self.app.on_login_fail(f"Erro ao carregar chave privada: {e}")
+                    return False
+
+                assinatura = private_key.sign(
+                    nonce,
+                    padding.PKCS1v15(),
+                    hashes.SHA256()
+                )
+
+                self.sock.sendall(len(assinatura).to_bytes(2, byteorder='big') + assinatura)
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FUNÇÃO RESPONSÁVEL PELO REGISTRO NA PLATAFORMA ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            elif tipo_conexao == b"R":
+                self.sock.sendall(len(public_key).to_bytes(4, byteorder='big'))
+                self.sock.sendall(public_key)
+            else:
+                self.app.on_login_fail("Resposta inválida do servidor.")
+                return False
+            # AGUARDA A RESPOSTA DO SERVIDOR
             response = self.sock.recv(1024).decode('utf-8')
 
             if response == "Nome aceito":
@@ -76,8 +109,8 @@ class ChatClient:
         except Exception as e:
             self.app.on_login_fail(f"Erro ao conectar: {e}")
             return False
-
-
+        
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOGICA DE CONEXÃO DA PLATAFORMA ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def send_message(self, recipient, message):
         try:
             self.sock.send(f"MSG:{recipient}:{message}".encode('utf-8'))
@@ -145,6 +178,7 @@ class ChatClient:
                 self.sock.close()
                 break
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CLASSE ChatApp - ENGLOBA LÓGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatApp(ctk.CTk):
     """Controlador da Interface Gráfica (GUI)"""
     def __init__(self, host='localhost', port=12345):
@@ -162,6 +196,7 @@ class ChatApp(ctk.CTk):
         self.chat_histories = {} 
         self.contact_widgets = {}
 
+    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESIGN DA UI - Define design da janela, dimensões, temas entre outros ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         self._setup_ui()
         
         self.after(100, self.process_incoming_messages)
@@ -178,7 +213,7 @@ class ChatApp(ctk.CTk):
 
         self._create_login_screen()
 
-    # --- Telas da Aplicação ---
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESIGN DA UI - Criação da tela de Login ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     
     def _create_login_screen(self):
         self.login_frame = ctk.CTkFrame(self.main_container)
@@ -198,7 +233,9 @@ class ChatApp(ctk.CTk):
 
         self.login_status_label = ctk.CTkLabel(self.login_frame, text="", text_color="red")
         self.login_status_label.pack(pady=(0, 10))
-        
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESING DA UI - Criação da tela principal, contatos e chat ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
     def _create_main_screen(self):
         self.contacts_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         ctk.CTkLabel(self.contacts_frame, text="Contatos", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=10)
@@ -232,10 +269,7 @@ class ChatApp(ctk.CTk):
         send_button = ctk.CTkButton(message_entry_frame, text="Enviar", width=80, command=self.send_chat_message)
         send_button.pack(side="right", padx=(10, 0))
 
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.primitives import serialization
-
-    # --- Lógica de Eventos e Navegação ---
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA DE CONEXÃO - Coleta os textos dos campos, verifica se tá tudo preenchido, carrega e gera chave, entre outros ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     
     def attempt_login(self):
         user = self.username_entry.get().strip()
@@ -249,27 +283,39 @@ class ChatApp(ctk.CTk):
         self.connect_button.configure(state="disabled", text="Conectando...")
         self.login_status_label.configure(text="")
 
-        # Gerar as chaves RSA
-        private_key, public_key = generate_rsa_keys()
-        # --- Função pra salvar a chave privada localmente
-        try:
-            filename = f"chaves/{user}_private_key.pem"
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA DE CONEXÃO - Gera as chaves privadas e encaminha diretamente pra a pasta local ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        filename = f"chaves/{user}_private_key.pem"
 
-            with open(filename, "wb") as f:
-                f.write(private_key)
-            print(f"[+] Chave privada salva em: {filename}")
-        except Exception as e:
-            print(f"[!] Erro ao salvar chave privada: {e}")
-            self.login_status_label.configure(text="Erro ao salvar chave privada.")
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Caso já existir, essa função vai carregar a chave existente (evita sobreescrever =D) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        if os.path.exists(filename):
+            print(f"[+] Chave já existente encontrada para {user}")
+            with open(filename, "rb") as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None,
+                    backend=default_backend()
+                )
+            public_key = private_key.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        else:
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Caso não existir, criar um novo par de chaves ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            private_key, public_key = generate_rsa_keys()
+            try:
+                with open(filename, "wb") as f:
+                    f.write(private_key)
+                print(f"[+] Nova chave privada salva em: {filename}")
+            except Exception as e:
+                print(f"[!] Erro ao salvar chave privada: {e}")
+                self.login_status_label.configure(text="Erro ao salvar chave privada.")
+                self.connect_button.configure(state="normal", text="Conectar")
+                return
+        success = self.client_logic.connect(server, self.port, user, public_key)
+        if not success:
             self.connect_button.configure(state="normal", text="Conectar")
-            return
-        # ------------------------------------------------
 
-        # Enviar a chave pública ao servidor junto com o nome de usuário
-        Thread(target=self.client_logic.connect, args=(self.host, self.port, self.username, public_key), daemon=True).start()
-
-
-
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Funções caso o login ocorra corretamente ou falhe ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def on_login_success(self):
         print("[*] Login bem-sucedido.")
         self.login_frame.destroy()
@@ -280,7 +326,7 @@ class ChatApp(ctk.CTk):
     def on_login_fail(self, message):
         self.login_status_label.configure(text=message)
         self.connect_button.configure(state="normal", text="Conectar")
-
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESIGN DA UI - Exibir contatos e chat ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def show_contacts_screen(self):
         self.chat_frame.pack_forget()
         self.contacts_frame.pack(fill="both", expand=True)
@@ -310,7 +356,7 @@ class ChatApp(ctk.CTk):
             self.update_contact_status(partner_name, self.contacts_data[partner_name]['status'])
 
 
-    # --- Processamento de Dados da Rede ---
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA - Processamento das mensagens ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     
     def process_incoming_messages(self):
         while not self.incoming_queue.empty():
@@ -342,18 +388,18 @@ class ChatApp(ctk.CTk):
                 print(f"[!] Erro ao processar mensagem da fila: '{msg}' -> {e}")
         
         self.after(100, self.process_incoming_messages)
-
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def handle_chat_message(self, sender, timestamp, text):
         formatted_message = f"[{timestamp}] {sender}: {text}\n"
 
         if sender not in self.chat_histories:
             self.chat_histories[sender] = ""
 
-        # Evita mensagens duplicadas no histórico
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Evita mensagens duplicadas no chat ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         if formatted_message not in self.chat_histories[sender]:
             self.chat_histories[sender] += formatted_message
 
-            # Se o chat estiver aberto com essa pessoa, exibe a mensagem
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Se o chat estiver aberto com essa pessoa, exibe as mensagens ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             if self.current_chat_partner == sender:
                 self.chat_textbox.configure(state="normal")
                 self.chat_textbox.insert("end", formatted_message)
@@ -408,7 +454,7 @@ class ChatApp(ctk.CTk):
         self.login_status_label.configure(text="Conexão com o servidor perdida.")
 
 
-    # --- Funções de UI ---
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESIGN DA UI - Criação de um card novo pra cada contato na lista ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
     def create_contact_widget(self, username):
         if username in self.contact_widgets:
@@ -422,9 +468,9 @@ class ChatApp(ctk.CTk):
         name_label.pack(side="left", fill="x", expand=True, padx=10, pady=10)
         name_label.bind("<Button-1>", lambda event, u=username: self.show_chat_screen(u))
 
-        # >>> Widget pra a notificação
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Widget para a notificação ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         unread_badge = ctk.CTkLabel(contact_entry, text="", fg_color="#1F6AA5", corner_radius=8, font=ctk.CTkFont(size=12, weight="bold"))
-        # O badge é empacotado mas fica invisível até que seja necessário
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ O badge é empacotado mas fica invisível até que seja necessário ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         unread_badge.pack(side="right", padx=5)
         unread_badge.pack_forget() # Esconde o badge inicialmente
         
@@ -441,11 +487,11 @@ class ChatApp(ctk.CTk):
             "name": name_label,
             "status_text": status_label,
             "status_indicator": status_indicator,
-            "unread_badge": unread_badge # Adiciona o badge ao dicionário de widgets
+            "unread_badge": unread_badge 
         }
         self.update_contact_status(username, self.contacts_data[username]['status'])
 
-    # Função para esconder o badge
+    #  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função para esconder o badge ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def update_unread_badge(self, username):
         if username not in self.contact_widgets:
             return
@@ -482,7 +528,7 @@ class ChatApp(ctk.CTk):
             status_indicator_widget.configure(fg_color="cyan")
 
 
-    # --- Ações do Usuário no Chat ---
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  LÓGICA - Ações do Usuário no chat ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     
     def on_typing(self, event):
         if self.current_chat_partner:

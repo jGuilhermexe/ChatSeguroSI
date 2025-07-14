@@ -1,25 +1,26 @@
 import sqlite3
 from datetime import datetime
 from contextlib import closing
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DATABASE.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Essa parte do código é responsável pela criação das tabelas do banco de dados em SQLite =D
 
 DB_PATH = "chat.db"
 
 def _get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-# Criação das tabelas do banco de dados
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Criação das tabelas do banco de dados ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def init_db():
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(
             """CREATE TABLE IF NOT EXISTS users (
                    username TEXT PRIMARY KEY,
-                   public_key BLOB
+                   public_key BLOB  
                )"""
         )
         conn.commit()
 
-# Adicionando usuários a tabela
-# Adicionando usuários à tabela, agora com a chave pública
+#  ~~~~~~~~~~~~ Adicionando usuários à tabela, agora com a chave pública ~~~~~~~~~~~~~~~~
 def add_user(username: str, public_key: bytes):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute("INSERT OR IGNORE INTO users (username, public_key) VALUES (?, ?)", (username, public_key))
@@ -34,13 +35,13 @@ def add_user(username: str, public_key: bytes):
         conn.commit()
 
 
-# Listando usuários 
+# ~~~~~~~~~~~~~~~~~~~~   Listando usuários  ~~~~~~~~~~~~~~~~~~~~~~
 def list_users() -> list[str]:
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute("SELECT username FROM users ORDER BY username")
         return [row[0] for row in cur.fetchall()]
 
-# Salvando mensagens em quanto os usuários estão offline
+# ~~~~~~~~~~~~~~~~~~~ Salvando mensagens em quanto os usuários estão offline ~~~~~~~~~~~~~~~~~~~~
 def store_offline(sender: str, recipient: str, text: str):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(f"""
@@ -69,7 +70,7 @@ def username_exists(username: str) -> bool:
         return cur.fetchone() is not None
 
 
- # Armazenar todo o histórico de mensagens no chat   
+ # ~~~~~~~~~~~~~~~~~~  Armazenar todo o histórico de mensagens no chat   ~~~~~~~~~~~~~~~~~~~~~~~~~~
 def store_message(recipient: str, sender: str, timestamp: str, text: str):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(f"""
@@ -83,3 +84,9 @@ def fetch_all_messages(recipient: str) -> list[tuple[str, str, str]]:
             SELECT sender, timestamp, text FROM messages_{recipient} ORDER BY id
         """)
         return cur.fetchall()
+    
+def get_public_key(username: str) -> bytes:
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute("SELECT public_key FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        return row[0] if row else None
