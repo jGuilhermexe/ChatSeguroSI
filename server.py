@@ -6,6 +6,7 @@ from struct import unpack
 import os
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
+import base64
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ SERVER.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #  Parte responsável do código por ser o servidor da nossa plataforma! =D
@@ -179,6 +180,27 @@ class Servidor:
                         self.clients[dest].send(f"CHAT:{client_name}:{timestamp}:{msg}".encode('utf-8'))
                     else:
                         client_socket.send(f"SYSTEM:{dest} está offline. Mensagem armazenada.".encode('utf-8'))
+                # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função responsável por fazer o intermédio entre as chaves publicas entre A e B ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                elif data.startswith("PUBKEY_REQUEST:"):
+                    try:
+                        _, target_username = data.strip().split(":", 1)
+                        print(f"\n[*] {client_name} pediu a chave pública de {target_username}")
+                        pubkey_bytes = db.get_public_key(target_username)
+                        if pubkey_bytes:
+                            pubkey_b64 = base64.b64encode(pubkey_bytes).decode('utf-8')
+                            print(f"[+] Enviando chave pública de {target_username} para {client_name}: {pubkey_b64[:30]}... (total {len(pubkey_b64)} bytes)")
+                            
+                            client_socket.send(f"PUBKEY_RESPONSE:{target_username}:{pubkey_b64}".encode('utf-8'))
+
+                        # ~~~~~~~~~~~~~~~~~~~~~~~~~ Função responsável por mostrar no terminal o nome do usuário A que quer conversar com B ~~~~~~~~~~~~~~~~~~~~~~~~~~
+                            if target_username in self.clients:
+                                self.clients[target_username].send(
+                                    f"PUBKEY_NOTIFY:{client_name} quer conversar com você.".encode('utf-8')
+                                )
+                        else:
+                            client_socket.send(f"SYSTEM:Usuário {target_username} não encontrado.".encode('utf-8'))
+                    except Exception as e:
+                        print(f"[!] Erro ao processar PUBKEY_REQUEST: {e}")
 
                 elif data.startswith("TYPING:"):
                     _, dest = data.split(":", 1)

@@ -10,6 +10,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 import os
+import base64
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GUI_CLIENT.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -45,7 +46,7 @@ class ChatClient:
         self.sock = socket(AF_INET, SOCK_STREAM)
         self.app = app_controller
         self.buffer = ""
-        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:"]
+        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:"]
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função de conexão da plataforma ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -177,6 +178,13 @@ class ChatClient:
                 self.app.incoming_queue.put(f"SYSTEM:CONEXAO_PERDIDA")
                 self.sock.close()
                 break
+
+    def request_public_key(self, username):
+        try:
+            print(f"\n[*] Cliente está pedindo ao servidor a chave pública de '{username}'...")
+            self.sock.send(f"PUBKEY_REQUEST:{username}".encode('utf-8'))
+        except Exception as e:
+            print(f"[!] Erro ao pedir chave pública: {e}")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CLASSE ChatApp - ENGLOBA LÓGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatApp(ctk.CTk):
@@ -341,9 +349,13 @@ class ChatApp(ctk.CTk):
         self.current_chat_partner = partner_name
         self.contacts_frame.pack_forget()
         self.chat_frame.pack(fill="both", expand=True)
-        
+
         self.chat_partner_label.configure(text=partner_name)
         self.title(f"Chat com {partner_name}")
+
+        # ~~~~~~~~~~~~~~~~~~~~~~~~ Solicita automaticamente a chave pública ao abrir o chat ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        self.client_logic.request_public_key(partner_name)
+
         
         self.chat_textbox.configure(state="normal")
         self.chat_textbox.delete("1.0", "end")
@@ -351,7 +363,7 @@ class ChatApp(ctk.CTk):
         self.chat_textbox.insert("1.0", history)
         self.chat_textbox.see("end")
         self.chat_textbox.configure(state="disabled")
-        
+
         if partner_name in self.contacts_data:
             self.update_contact_status(partner_name, self.contacts_data[partner_name]['status'])
 
@@ -366,6 +378,19 @@ class ChatApp(ctk.CTk):
                 if msg.startswith("CHAT:"):
                     _, sender, ts, txt = msg.split(":", 3)
                     self.handle_chat_message(sender, ts, txt)
+                elif msg.startswith("PUBKEY_RESPONSE:"):
+                    try:
+                        # print(f"[DEBUG] Mensagem recebida (PUBKEY_RESPONSE): {msg}") ~~~~~~~~~~~ Com esse print podemos ver a chave publica da pessoa em questão no terminal
+                        _, target_username, pubkey_b64 = msg.split(":", 2)
+                        pubkey_bytes = base64.b64decode(pubkey_b64)
+                        print(f"[+] Recebeu do servidor a chave pública de '{target_username}' (total {len(pubkey_bytes)} bytes).")
+                        self.store_contact_public_key(target_username, pubkey_bytes)
+                    except Exception as e:
+                        print(f"[!] Erro ao processar chave pública recebida: {e}")
+
+                elif msg.startswith("PUBKEY_NOTIFY:"):
+                    _, content = msg.split(":", 1)
+                    print(f"[!] Notificação: {content}")
                 elif msg.startswith("TYPING:"):
                     _, who = msg.split(":", 1)
                     self.handle_typing_status(who)
@@ -553,6 +578,12 @@ class ChatApp(ctk.CTk):
         self.chat_textbox.configure(state="disabled")
         
         self.message_entry.delete(0, "end")
+
+    def store_contact_public_key(self, username, pubkey_bytes):
+        if not hasattr(self, 'contact_public_keys'):
+            self.contact_public_keys = {}
+        self.contact_public_keys[username] = pubkey_bytes
+        print(f"[+] Chave pública de '{username}' armazenada na memória. {len(pubkey_bytes)} bytes.")
 
 
 if __name__ == "__main__":
