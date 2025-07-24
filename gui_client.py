@@ -9,8 +9,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import os
 import base64
+import traceback
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GUI_CLIENT.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -39,6 +42,21 @@ def generate_rsa_keys():
         
     return private_pem, public_pem
 
+DH_PARAMETERS = dh.generate_parameters(generator=2, key_size=512, backend=default_backend())
+
+def generate_dh_key_pair():
+    """Gera uma chave efêmera DH (Diffie-Hellman)"""
+    private_key = DH_PARAMETERS.generate_private_key()
+    public_key = private_key.public_key()
+    
+    # Serializa a chave pública para enviar ao outro usuário
+    public_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    
+    return private_key, public_bytes
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA: A classe ChatClient é responsável pela lógica da conexão da rede ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatClient:
     """Lógica de Rede do Cliente (Refatorada)"""
@@ -46,7 +64,7 @@ class ChatClient:
         self.sock = socket(AF_INET, SOCK_STREAM)
         self.app = app_controller
         self.buffer = ""
-        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:"]
+        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:" "DHE_INIT:", "DHE_RESPONSE:"]
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função de conexão da plataforma ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -167,6 +185,7 @@ class ChatClient:
         while True:
             try:
                 data = self.sock.recv(4096).decode('utf-8')
+                print("[RECV] Data recebida do servidor:", repr(data))
                 if not data:
                     raise ConnectionResetError()
                 
@@ -179,12 +198,215 @@ class ChatClient:
                 self.sock.close()
                 break
 
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~ LÓGICA - Cliente requisita ao servidor a chave publica entre cliente A e B ~~~~~~~~~~~~~~~~~~~~~~
     def request_public_key(self, username):
         try:
             print(f"\n[*] Cliente está pedindo ao servidor a chave pública de '{username}'...")
             self.sock.send(f"PUBKEY_REQUEST:{username}".encode('utf-8'))
         except Exception as e:
             print(f"[!] Erro ao pedir chave pública: {e}")
+
+    def initiate_handshake(self, recipient):
+        """Inicia o Handshake com Diffie-Hellman enviando salt + chave pública criptografados com a RSA do destinatário."""
+        try:
+            # Gera o par efêmero DH
+            print(f"[DEBUG] Gerando chave DH efêmera...")
+            self.dh_private_key, dh_public_bytes = generate_dh_key_pair()
+            print(f"[DEBUG] Tamanho da chave DH pública gerada: {len(dh_public_bytes)} bytes")
+
+            # Verifica se temos a chave pública do destinatário
+            pubkey_bytes = self.app.contact_public_keys.get(recipient)
+            print(f"[DEBUG] Tamanho da chave RSA pública recebida: {len(pubkey_bytes)} bytes")
+            if not pubkey_bytes:
+                print(f"[!] Chave pública RSA de {recipient} não encontrada.")
+                return
+
+            # Gera o salt aleatório (16 bytes)
+            salt = os.urandom(16)
+            print(f"[DEBUG] Salt gerado: {salt.hex()}")
+
+            # Junta o salt com a chave DH
+            payload = salt + dh_public_bytes
+            print(f"[DEBUG] Tamanho do payload (salt + DH): {len(payload)} bytes")
+
+            # Carrega a chave RSA pública do destinatário
+            recipient_rsa_key = serialization.load_pem_public_key(pubkey_bytes)
+            print(f"[DEBUG] Chave RSA pública carregada com sucesso, pronta para cifrar.")
+
+            # Criptografa o payload com a RSA do destinatário
+            encrypted_payload = recipient_rsa_key.encrypt(
+                payload,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            print(f"[DEBUG] Payload criptografado com RSA, tamanho: {len(encrypted_payload)} bytes")
+
+            # Envia ao servidor (em base64 para facilitar transporte)
+            encoded_payload = base64.b64encode(encrypted_payload).decode('utf-8')
+            self.sock.send(f"DHE_INIT:{recipient}:{encoded_payload}".encode('utf-8'))
+
+            print(f"[+] Handshake iniciado com {recipient}. Salt e chave DH enviados.")
+
+        except Exception as e:
+            print(f"[!] Erro ao iniciar handshake com {recipient}: {e}")
+
+
+    def handle_dhe_init(self, sender, encrypted_dh_b64):
+        """Recebe o DHE_INIT de outro cliente (usuário A) e responde com sua chave DH."""
+        try:
+            # Descriptografa o payload recebido (salt + dh_public_bytes)
+            encrypted_payload = base64.b64decode(encrypted_dh_b64)
+            with open(f"chaves/{self.app.username}_private_key.pem", "rb") as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None,
+                    backend=default_backend()
+                )
+            payload = private_key.decrypt(
+                encrypted_payload,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # Extrai salt (16 bytes) e a chave DH do peer
+            salt = payload[:16]
+            peer_dh_bytes = payload[16:]
+            print(f"[DEBUG] Salt recebido de {sender}: {salt.hex()}")
+
+            # Carrega a chave DH pública do peer (usuário A)
+            peer_dh_key = serialization.load_der_public_key(peer_dh_bytes, backend=default_backend())
+
+            # Gera seu próprio par DH (privada e pública)
+            self.dh_private_key, my_dh_bytes = generate_dh_key_pair()
+
+            # Salva a chave pública do outro (para usar depois)
+            if not hasattr(self, 'peer_dh_keys'):
+                self.peer_dh_keys = {}
+            self.peer_dh_keys[sender] = peer_dh_key
+
+            # Criptografa sua própria DH com a RSA de A
+            rsa_pubkey_bytes = self.app.contact_public_keys.get(sender)
+            if not rsa_pubkey_bytes:
+                print(f"[!] Chave pública RSA de {sender} não encontrada.")
+                return
+            sender_rsa_key = serialization.load_pem_public_key(rsa_pubkey_bytes)
+            encrypted_my_dh = sender_rsa_key.encrypt(
+                my_dh_bytes,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            encoded_my_dh = base64.b64encode(encrypted_my_dh).decode('utf-8')
+            self.sock.send(f"DHE_RESPONSE:{sender}:{encoded_my_dh}".encode('utf-8'))
+
+            print(f"[+] Enviou DHE_RESPONSE para {sender} com sua chave DH.")
+
+            # Calcula o segredo DH com a chave privada local e a chave pública DH do outro
+            shared_key = self.dh_private_key.exchange(peer_dh_key)
+
+            # Aplica o HKDF para derivar 64 bytes (512 bits)
+            hkdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=64,
+                salt=salt,
+                info=None,
+                backend=default_backend()
+            )
+            derived_key = hkdf.derive(shared_key)
+
+            aes_key = derived_key[:32]
+            hmac_key = derived_key[32:]
+
+            print("[B] Chave AES:", aes_key.hex())
+            print("[B] Chave HMAC:", hmac_key.hex())
+
+            # Armazena na memória
+            if not hasattr(self, 'session_keys'):
+                self.session_keys = {}
+            self.session_keys[sender] = {
+                "aes": aes_key,
+                "hmac": hmac_key,
+                "salt": salt
+            }
+
+        except Exception as e:
+            print(f"[!] Erro ao processar DHE_INIT de {sender}: {e}")
+
+    def handle_dhe_response(self, sender, encrypted_dh_b64):
+        try:
+            print(f"[*] Recebeu DHE_RESPONSE de {sender}")
+            encrypted_dh = base64.b64decode(encrypted_dh_b64)
+
+            # 1. Carrega sua chave RSA privada para descriptografar a chave DH do outro
+            private_key_path = f"chaves/{self.app.username}_private_key.pem"
+            with open(private_key_path, "rb") as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None,
+                    backend=default_backend()
+                )
+
+            # 2. Descriptografa a chave DH do outro
+            peer_dh_bytes = private_key.decrypt(
+                encrypted_dh,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # 3. Carrega chave pública DH do outro (B)
+            peer_dh_key = serialization.load_pem_public_key(peer_dh_bytes, backend=default_backend())
+
+            # 4. Calcula o segredo DH compartilhado usando sua chave privada e a chave pública do outro
+            shared_key = self.dh_private_key.exchange(peer_dh_key)
+
+            print(f"[+] Chave DH compartilhada gerada ({len(shared_key)} bytes).")
+
+            # ~~~ Etapa 2: Gerar SALT ~~~
+            salt = os.urandom(16)
+            print(f"[+] Salt gerado ({len(salt)} bytes): {salt.hex()}")
+
+            # ~~~ Etapa 3: Aplicar HKDF para derivar 2 chaves (AES + HMAC) ~~~
+            hkdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=64,  # 512 bits
+                salt=salt,
+                info=None,
+                backend=default_backend()
+            )
+            derived_key = hkdf.derive(shared_key)
+
+            aes_key = derived_key[:32]
+            hmac_key = derived_key[32:]
+
+            print("[✓] Chave AES derivada:", aes_key.hex())
+            print("[✓] Chave HMAC derivada:", hmac_key.hex())
+
+            # Armazena as chaves na memória
+            if not hasattr(self, 'session_keys'):
+                self.session_keys = {}
+            self.session_keys[sender] = {
+                "aes": aes_key,
+                "hmac": hmac_key,
+                "salt": salt
+            }
+
+            print(f"[✓] Handshake finalizado com {sender}. AES + HMAC prontos para uso.")
+
+        except Exception as e:
+            traceback.print_exc()  # ✅ Adiciona rastreamento completo
+            print(f"[!] Erro ao processar DHE_INIT de {sender}: {e}")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CLASSE ChatApp - ENGLOBA LÓGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatApp(ctk.CTk):
@@ -374,6 +596,7 @@ class ChatApp(ctk.CTk):
         while not self.incoming_queue.empty():
             try:
                 msg = self.incoming_queue.get_nowait()
+                print("[QUEUE] Mensagem da fila:", repr(msg))
                 
                 if msg.startswith("CHAT:"):
                     _, sender, ts, txt = msg.split(":", 3)
@@ -385,6 +608,10 @@ class ChatApp(ctk.CTk):
                         pubkey_bytes = base64.b64decode(pubkey_b64)
                         print(f"[+] Recebeu do servidor a chave pública de '{target_username}' (total {len(pubkey_bytes)} bytes).")
                         self.store_contact_public_key(target_username, pubkey_bytes)
+                        if self.current_chat_partner == target_username:
+                            print(f"[*] Iniciando handshake com {target_username}")
+                            self.client_logic.initiate_handshake(target_username)
+
                     except Exception as e:
                         print(f"[!] Erro ao processar chave pública recebida: {e}")
 
@@ -401,6 +628,13 @@ class ChatApp(ctk.CTk):
                     _, user_list_str = msg.split(":", 1)
                     users = user_list_str.split(",") if user_list_str else []
                     self.handle_contacts_update(users)
+                elif msg.startswith("DHE_INIT:"):
+                    _, sender, dh_b64 = msg.split(":", 2)
+                    self.client_logic.handle_dhe_init(sender, dh_b64)
+                elif msg.startswith("DHE_RESPONSE:"):
+                    _, sender, b64 = msg.split(":", 2)
+                    self.client_logic.handle_dhe_response(sender, b64)
+
                 elif msg.startswith("SYSTEM:"):
                     content = msg.split(":", 1)[1]
                     if content == "CONEXAO_PERDIDA":
@@ -578,7 +812,7 @@ class ChatApp(ctk.CTk):
         self.chat_textbox.configure(state="disabled")
         
         self.message_entry.delete(0, "end")
-
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Lógica - Função pra armazenar a chave publica dos usuários na memória ~~~~~~~~~~~~~~~~~~~~~~~~
     def store_contact_public_key(self, username, pubkey_bytes):
         if not hasattr(self, 'contact_public_keys'):
             self.contact_public_keys = {}

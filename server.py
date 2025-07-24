@@ -205,7 +205,31 @@ class Servidor:
                 elif data.startswith("TYPING:"):
                     _, dest = data.split(":", 1)
                     if dest in self.clients:
+
                         self.clients[dest].send(f"TYPING:{client_name}".encode('utf-8'))
+                # ~~~~~~~~~~~~~~~~~~~~~~~ BLOCO PARA O ROTEAMENTO DAS CHAVES DH ~~~~~~~~~~~~~~~~~~~~~~~~
+                elif data.startswith("DHE_INIT:"):
+                    try:
+                        _, dest, encrypted_dh_b64 = data.split(":", 2)
+                        if dest in self.clients:
+                            self.clients[dest].send(f"DHE_INIT:{client_name}:{encrypted_dh_b64}".encode('utf-8'))
+                            print(f"[+] Roteando DHE_INIT de {client_name} para {dest}")
+                        else:
+                            client_socket.send(f"SYSTEM:{dest} está offline. Handshake não pode ser iniciado.".encode('utf-8'))
+                    except Exception as e:
+                        print(f"[!] Erro ao processar DHE_INIT: {e}")
+
+                elif data.startswith("DHE_RESPONSE:"):
+                    try:
+                        _, dest, encrypted_dh_b64 = data.split(":", 2)
+                        if dest in self.clients:
+                            # repassa a resposta para o cliente que iniciou
+                            self.clients[dest].send(f"DHE_RESPONSE:{client_name}:{encrypted_dh_b64}".encode('utf-8'))
+                            print(f"[+] Roteando DHE_RESPONSE de {client_name} para {dest}")
+                        else:
+                            client_socket.send(f"SYSTEM:{dest} está offline. Handshake não pode ser finalizado.".encode('utf-8'))
+                    except Exception as e:
+                        print(f"[!] Erro ao processar DHE_RESPONSE: {e}")
 
                 elif data.strip() == "LIST":
                     self._send_contacts(client_socket)
