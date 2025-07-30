@@ -45,6 +45,7 @@ def list_users() -> list[str]:
 def store_offline(sender: str, recipient: str, text: str):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(f"""
+            print(f"[DEBUG] store_offline: text={text}")
             INSERT INTO messages_{recipient} (sender, timestamp, text)
             VALUES (?, ?, ?)
         """, (sender, datetime.now().isoformat(timespec="seconds"), text))

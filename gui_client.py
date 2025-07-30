@@ -11,14 +11,137 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes, hmac, padding as sym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding as sym_padding, hashes, hmac
+import hmac as stdlib_hmac
 import os
 import base64
 import traceback
+from datetime import datetime
+
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GUI_CLIENT.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Essa parte do código é responsável pelo design da interface gráfica e também da lógica.
 
+def cifrar_mensagem(message, aes_key, hmac_key):
+    iv = os.urandom(16)
+
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
+    encryptor = cipher.encryptor()
+
+    padder = sym_padding.PKCS7(128).padder()
+    padded_data = padder.update(message.encode('utf-8')) + padder.finalize()
+
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+
+    # Calcula HMAC sobre IV + ciphertext
+    h = hmac.HMAC(hmac_key, hashes.SHA256())
+    h.update(iv + ciphertext)
+    hmac_value = h.finalize()
+    print("\n[DEBUG - CIFRAR]")
+    print("Mensagem original:", message)
+    print("IV:", iv.hex())
+    print("Ciphertext:", ciphertext.hex())
+    print("HMAC gerado:", hmac_value.hex())
+    print("HMAC key usada:", hmac_key.hex())
+    print("AES key usada :", aes_key.hex())
+    # Retorna base64(IV + ciphertext + HMAC)
+    return base64.b64encode(iv + ciphertext + hmac_value).decode('utf-8')
+
+
+def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
+    try:
+        print("\n[DEBUG DECIFRAR]")
+        print(f"Chave AES usada: {aes_key.hex()}")
+        print(f"Chave HMAC usada: {hmac_key.hex()}")
+        print(f"Base64 recebido: {encrypted_b64[:50]}... (tamanho: {len(encrypted_b64)})")
+        
+        # 1. Pré-processamento do Base64
+        encrypted_b64 = encrypted_b64.strip()
+        print("[DEBUG] Base64 após strip:", repr(encrypted_b64))
+        
+        # 2. Verificação básica do tamanho
+        if len(encrypted_b64) < 44:  # IV(16) + HMAC(32) + mínimo 1 byte de ciphertext
+            raise ValueError("Payload cifrado muito curto para ser válido")
+
+        # 3. Adicionar padding se necessário (Base64 deve ter comprimento múltiplo de 4)
+        padding_needed = len(encrypted_b64) % 4
+        if padding_needed:
+            print(f"[DEBUG] Adicionando {4-padding_needed} caracteres de padding")
+            encrypted_b64 += '=' * (4 - padding_needed)
+
+        # 4. Decodificação Base64
+        try:
+            raw = base64.b64decode(encrypted_b64)
+        except Exception as e:
+            print(f"[!!!] Falha ao decodificar Base64: {e}")
+            print("[DEBUG] Base64 problemático:", encrypted_b64)
+            raise ValueError("Base64 inválido") from e
+
+        print("[DEBUG] Tamanho após decodificação:", len(raw))
+        
+        # 5. Verificação do tamanho mínimo dos dados
+        if len(raw) < 48:  # IV(16) + HMAC(32)
+            raise ValueError("Dados decodificados insuficientes")
+
+        # 6. Extração de IV, ciphertext e HMAC
+        iv = raw[:16]
+        ciphertext = raw[16:-32]
+        recv_hmac = raw[-32:]
+        
+        print("[DEBUG - DECIFRAR]")
+        print("IV:", iv.hex())
+        print("Ciphertext:", ciphertext.hex() if ciphertext else "VAZIO")
+        print("HMAC recebido:", recv_hmac.hex())
+        print("HMAC key usada:", hmac_key.hex())
+        print("AES key usada:", aes_key.hex())
+
+        # 7. Verificação do HMAC
+        h = hmac.HMAC(hmac_key, hashes.SHA256())
+        h.update(iv + ciphertext)
+        expected_hmac = h.finalize()
+        
+        print("HMAC esperado:", expected_hmac.hex())
+
+        if not stdlib_hmac.compare_digest(expected_hmac, recv_hmac):
+            print("[!!!] HMAC inválido - possível manipulação da mensagem!")
+            raise ValueError("Falha na verificação de integridade (HMAC)")
+
+        # 8. Decifração AES
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        
+        try:
+            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        except Exception as e:
+            print(f"[!!!] Erro ao decifrar: {e}")
+            raise ValueError("Decifração falhou") from e
+
+        # 9. Remoção do padding PKCS7
+        unpadder = sym_padding.PKCS7(128).unpadder()
+        
+        try:
+            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
+        except ValueError as e:
+            print(f"[!!!] Erro ao remover padding: {e}")
+            raise ValueError("Padding inválido") from e
+
+        # 10. Decodificação UTF-8
+        try:
+            mensagem_decifrada = plaintext.decode('utf-8')
+        except UnicodeDecodeError as e:
+            print(f"[!!!] Erro ao decodificar UTF-8: {e}")
+            raise ValueError("Mensagem decifrada não é UTF-8 válido") from e
+
+        print("[✓] Mensagem decifrada com sucesso!")
+        return mensagem_decifrada
+
+    except Exception as e:
+        print(f"[!!!] Erro crítico em decifrar_mensagem: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise  # Re-lança a exceção para tratamento superior
 
 # Função para gerar par de chaves RSA, colocando antes da classChatClient pra evitar qualquer tipo de conflito.
 def generate_rsa_keys():
@@ -42,7 +165,9 @@ def generate_rsa_keys():
         
     return private_pem, public_pem
 
-DH_PARAMETERS = dh.generate_parameters(generator=2, key_size=512, backend=default_backend())
+with open("dh_params.pem", "rb") as f:
+    DH_PARAMETERS = serialization.load_pem_parameters(f.read(), backend=default_backend())
+
 
 def generate_dh_key_pair():
     """Gera uma chave efêmera DH (Diffie-Hellman)"""
@@ -61,10 +186,13 @@ def generate_dh_key_pair():
 class ChatClient:
     """Lógica de Rede do Cliente (Refatorada)"""
     def __init__(self, app_controller):
+        self.session_keys = {}  # dicionário para guardar AES/HMAC/salt por contato
+        self.peer_dh_keys = {}
         self.sock = socket(AF_INET, SOCK_STREAM)
         self.app = app_controller
         self.buffer = ""
-        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:" "DHE_INIT:", "DHE_RESPONSE:"]
+        self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:", "DHE_INIT:", "DHE_RESPONSE:"]
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função de conexão da plataforma ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -130,11 +258,59 @@ class ChatClient:
             return False
         
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOGICA DE CONEXÃO DA PLATAFORMA ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    
     def send_message(self, recipient, message):
         try:
-            self.sock.send(f"MSG:{recipient}:{message}".encode('utf-8'))
+            if not hasattr(self, 'session_keys'):
+                print(f"[!] Nenhuma sessão estabelecida com {recipient}. Não é possível enviar mensagem segura.")
+                return
+
+            if recipient not in self.session_keys:
+                print(f"[!] Nenhuma sessão estabelecida com {recipient}. Iniciando handshake...")
+                self.initiate_handshake(recipient)
+                return
+
+            session = self.session_keys[recipient]
+            
+            if "aes" not in session or "hmac" not in session:
+                print(f"[!] Handshake com {recipient} ainda não finalizado. Não é possível enviar mensagem.")
+                # Tenta reiniciar o handshake se estiver demorando muito
+                if "handshake_time" not in session or (datetime.now() - session["handshake_time"]).seconds > 10:
+                    print(f"[!] Reiniciando handshake com {recipient}...")
+                    session["handshake_time"] = datetime.now()
+                    self.initiate_handshake(recipient)
+                return
+
+            # Remove quebras de linha e espaços extras da mensagem
+            message = message.strip()
+            if not message:
+                print("[!] Mensagem vazia ignorada.")
+                return
+
+            print(f"[DEBUG] Preparando para cifrar mensagem para {recipient}")
+            encrypted_payload = cifrar_mensagem(message, session["aes"], session["hmac"])
+            
+            # Garante que o payload não contenha caracteres que possam quebrar o protocolo
+            encrypted_payload = encrypted_payload.replace('\n', '').replace('\r', '').replace(':', '')
+            
+            timestamp = datetime.now().isoformat(timespec='seconds')
+            protocol_message = f"MSG:{recipient}:{timestamp}:{encrypted_payload}\n"
+            
+            print(f"[DEBUG] Enviando mensagem cifrada para {recipient}")
+            print(f"[DEBUG] Tamanho do payload: {len(encrypted_payload)} caracteres")
+            
+            try:
+                self.sock.sendall(protocol_message.encode('utf-8'))
+                print(f"[✓] Mensagem para {recipient} enviada com sucesso.")
+            except Exception as send_error:
+                print(f"[!] Erro ao enviar mensagem para {recipient}: {send_error}")
+                # Tenta reconectar se houver erro de conexão
+                if isinstance(send_error, (ConnectionResetError, BrokenPipeError)):
+                    self.app.incoming_queue.put("SYSTEM:CONEXAO_PERDIDA")
+
         except Exception as e:
-            print(f"[!] Erro ao enviar mensagem: {e}")
+            print(f"[!!!] Erro crítico em send_message: {e}")
+            traceback.print_exc()
 
     def send_typing_notification(self, recipient):
         try:
@@ -158,34 +334,33 @@ class ChatClient:
 
             if first_msg_start == -1:
                 return
-            
+
             if first_msg_start > 0:
                 self.buffer = self.buffer[first_msg_start:]
 
             next_msg_start = -1
-            start_search_pos = 1 
-            
+            # Aqui buscamos o próximo prefixo conhecido a partir de 1 após o início atual
             for prefix in self.COMMAND_PREFIXES:
-                pos = self.buffer.find(prefix, start_search_pos)
+                pos = self.buffer.find(prefix, first_msg_start + 1)
                 if pos != -1 and (next_msg_start == -1 or pos < next_msg_start):
                     next_msg_start = pos
-            
+
             if next_msg_start != -1:
                 message = self.buffer[:next_msg_start]
                 self.buffer = self.buffer[next_msg_start:]
-                self.app.incoming_queue.put(message)
-                continue
+                self.app.incoming_queue.put(message.strip())
             else:
+                # Nenhum prefixo futuro encontrado; mensagem completa é tudo o que sobrou
                 message = self.buffer
                 self.buffer = ""
-                self.app.incoming_queue.put(message)
+                self.app.incoming_queue.put(message.strip())
                 break
 
     def _receive_loop(self):
         while True:
             try:
                 data = self.sock.recv(4096).decode('utf-8')
-                print("[RECV] Data recebida do servidor:", repr(data))
+                #print("[RECV] Data recebida do servidor:", repr(data))
                 if not data:
                     raise ConnectionResetError()
                 
@@ -208,7 +383,11 @@ class ChatClient:
             print(f"[!] Erro ao pedir chave pública: {e}")
 
     def initiate_handshake(self, recipient):
-        """Inicia o Handshake com Diffie-Hellman enviando salt + chave pública criptografados com a RSA do destinatário."""
+        """Inicia o Handshake com Diffie-Hellman"""
+        if recipient in self.session_keys and "aes" in self.session_keys[recipient]:
+            print(f"[!] Handshake com {recipient} já estabelecido.")
+            return
+        
         try:
             # Gera o par efêmero DH
             print(f"[DEBUG] Gerando chave DH efêmera...")
@@ -216,18 +395,27 @@ class ChatClient:
             print(f"[DEBUG] Tamanho da chave DH pública gerada: {len(dh_public_bytes)} bytes")
 
             # Verifica se temos a chave pública do destinatário
-            pubkey_bytes = self.app.contact_public_keys.get(recipient)
+            pubkey_bytes = getattr(self.app, 'contact_public_keys', {}).get(recipient)
             print(f"[DEBUG] Tamanho da chave RSA pública recebida: {len(pubkey_bytes)} bytes")
             if not pubkey_bytes:
                 print(f"[!] Chave pública RSA de {recipient} não encontrada.")
                 return
 
-            # Gera o salt aleatório (16 bytes)
-            salt = os.urandom(16)
-            print(f"[DEBUG] Salt gerado: {salt.hex()}")
+            if recipient not in self.session_keys:
+                self.session_keys[recipient] = {}
+
+            salt = self.session_keys[recipient].get("salt")
+            if not salt:
+                salt = os.urandom(16)
+                self.session_keys[recipient]["salt"] = salt
+
+            print(f"[DEBUG] Salt utilizado: {salt.hex()}")
 
             # Junta o salt com a chave DH
             payload = salt + dh_public_bytes
+            print(f"[HANDSHAKE] (A - INIT) Salt enviado: {salt.hex()}")
+            print(f"[HANDSHAKE] (A - INIT) Minha DH pública (DER): {dh_public_bytes.hex()}")
+
             print(f"[DEBUG] Tamanho do payload (salt + DH): {len(payload)} bytes")
 
             # Carrega a chave RSA pública do destinatário
@@ -258,6 +446,12 @@ class ChatClient:
     def handle_dhe_init(self, sender, encrypted_dh_b64):
         """Recebe o DHE_INIT de outro cliente (usuário A) e responde com sua chave DH."""
         try:
+            print(f"[DEBUG] Iniciando handle_dhe_init com {sender}")
+            if sender not in self.app.contact_public_keys:
+                print(f"[!] Chave pública de {sender} não carregada ainda. Solicitando ao servidor...")
+                self.request_public_key(sender)
+                return  # Sai do método, vamos tentar de novo quando receber
+            
             # Descriptografa o payload recebido (salt + dh_public_bytes)
             encrypted_payload = base64.b64decode(encrypted_dh_b64)
             with open(f"chaves/{self.app.username}_private_key.pem", "rb") as f:
@@ -278,6 +472,9 @@ class ChatClient:
             # Extrai salt (16 bytes) e a chave DH do peer
             salt = payload[:16]
             peer_dh_bytes = payload[16:]
+            print(f"[HANDSHAKE] (B - RECEIVED INIT) Salt recebido: {salt.hex()}")
+            print(f"[HANDSHAKE] (B - RECEIVED INIT) DH pública do peer (DER): {peer_dh_bytes.hex()}")
+
             print(f"[DEBUG] Salt recebido de {sender}: {salt.hex()}")
 
             # Carrega a chave DH pública do peer (usuário A)
@@ -285,14 +482,15 @@ class ChatClient:
 
             # Gera seu próprio par DH (privada e pública)
             self.dh_private_key, my_dh_bytes = generate_dh_key_pair()
+            print(f"[HANDSHAKE] (B - RESPONSE) Minha DH pública (DER): {my_dh_bytes.hex()}")
 
             # Salva a chave pública do outro (para usar depois)
             if not hasattr(self, 'peer_dh_keys'):
                 self.peer_dh_keys = {}
-            self.peer_dh_keys[sender] = peer_dh_key
+                self.peer_dh_keys[sender] = peer_dh_key
 
             # Criptografa sua própria DH com a RSA de A
-            rsa_pubkey_bytes = self.app.contact_public_keys.get(sender)
+            rsa_pubkey_bytes = getattr(self.app, 'contact_public_keys', {}).get(sender)
             if not rsa_pubkey_bytes:
                 print(f"[!] Chave pública RSA de {sender} não encontrada.")
                 return
@@ -312,6 +510,8 @@ class ChatClient:
 
             # Calcula o segredo DH com a chave privada local e a chave pública DH do outro
             shared_key = self.dh_private_key.exchange(peer_dh_key)
+            print(f"[HANDSHAKE] Shared Key: {shared_key.hex()}")
+
 
             # Aplica o HKDF para derivar 64 bytes (512 bits)
             hkdf = HKDF(
@@ -325,28 +525,37 @@ class ChatClient:
 
             aes_key = derived_key[:32]
             hmac_key = derived_key[32:]
+            print(f"\n[DEBUG-HANDSHAKE] Chaves derivadas (handle_dhe_init - RECEBIDO de {sender}):")
+            print(f"Shared Key: {shared_key.hex()}")
+            print(f"Salt usado: {salt.hex()}")
+            print(f"AES Key (32 bytes): {aes_key.hex()}")
+            print(f"HMAC Key (32 bytes): {hmac_key.hex()}\n")
 
-            print("[B] Chave AES:", aes_key.hex())
-            print("[B] Chave HMAC:", hmac_key.hex())
-
-            # Armazena na memória
+            # Armazena/atualiza a sessão com as chaves derivadas
             if not hasattr(self, 'session_keys'):
                 self.session_keys = {}
-            self.session_keys[sender] = {
-                "aes": aes_key,
-                "hmac": hmac_key,
-                "salt": salt
-            }
+
+            if sender not in self.session_keys:
+                self.session_keys[sender] = {}
+
+            self.session_keys[sender]["salt"] = salt
+            self.session_keys[sender]["aes"] = aes_key
+            self.session_keys[sender]["hmac"] = hmac_key
 
         except Exception as e:
             print(f"[!] Erro ao processar DHE_INIT de {sender}: {e}")
 
     def handle_dhe_response(self, sender, encrypted_dh_b64):
+
         try:
+            if sender not in self.app.contact_public_keys:
+                print(f"[!] Chave pública de {sender} não carregada ainda. Solicitando ao servidor...")
+                self.request_public_key(sender)
+                return 
             print(f"[*] Recebeu DHE_RESPONSE de {sender}")
             encrypted_dh = base64.b64decode(encrypted_dh_b64)
 
-            # 1. Carrega sua chave RSA privada para descriptografar a chave DH do outro
+            # Carrega chave RSA privada para descriptografar
             private_key_path = f"chaves/{self.app.username}_private_key.pem"
             with open(private_key_path, "rb") as f:
                 private_key = serialization.load_pem_private_key(
@@ -355,7 +564,7 @@ class ChatClient:
                     backend=default_backend()
                 )
 
-            # 2. Descriptografa a chave DH do outro
+            # Descriptografa a chave DH do peer
             peer_dh_bytes = private_key.decrypt(
                 encrypted_dh,
                 padding.OAEP(
@@ -365,22 +574,24 @@ class ChatClient:
                 )
             )
 
-            # 3. Carrega chave pública DH do outro (B)
-            peer_dh_key = serialization.load_pem_public_key(peer_dh_bytes, backend=default_backend())
 
-            # 4. Calcula o segredo DH compartilhado usando sua chave privada e a chave pública do outro
+            # Carrega chave pública DH do outro
+            peer_dh_key = serialization.load_der_public_key(peer_dh_bytes, backend=default_backend())
+
+            # Calcula segredo DH usando a chave privada local e a chave pública do outro
             shared_key = self.dh_private_key.exchange(peer_dh_key)
+            print(f"[HANDSHAKE] Shared Key: {shared_key.hex()}")
+
 
             print(f"[+] Chave DH compartilhada gerada ({len(shared_key)} bytes).")
 
-            # ~~~ Etapa 2: Gerar SALT ~~~
-            salt = os.urandom(16)
-            print(f"[+] Salt gerado ({len(salt)} bytes): {salt.hex()}")
+            # Usa o mesmo salt usado no DHE_INIT
+            salt = self.session_keys[sender]["salt"]
 
-            # ~~~ Etapa 3: Aplicar HKDF para derivar 2 chaves (AES + HMAC) ~~~
+            # Deriva AES + HMAC com HKDF
             hkdf = HKDF(
                 algorithm=hashes.SHA256(),
-                length=64,  # 512 bits
+                length=64,
                 salt=salt,
                 info=None,
                 backend=default_backend()
@@ -390,23 +601,26 @@ class ChatClient:
             aes_key = derived_key[:32]
             hmac_key = derived_key[32:]
 
-            print("[✓] Chave AES derivada:", aes_key.hex())
-            print("[✓] Chave HMAC derivada:", hmac_key.hex())
+            print(f"\n[DEBUG-HANDSHAKE] Chaves derivadas (handle_dhe_response - RESPOSTA de {sender}):")
+            print(f"Shared Key: {shared_key.hex()}")
+            print(f"Salt usado: {salt.hex()}")
+            print(f"AES Key (32 bytes): {aes_key.hex()}")
+            print(f"HMAC Key (32 bytes): {hmac_key.hex()}\n")
 
-            # Armazena as chaves na memória
-            if not hasattr(self, 'session_keys'):
-                self.session_keys = {}
-            self.session_keys[sender] = {
-                "aes": aes_key,
-                "hmac": hmac_key,
-                "salt": salt
-            }
+            # Garante que a sessão existe
+            if sender not in self.session_keys:
+                self.session_keys[sender] = {}
+
+            # Salva as chaves derivadas
+            self.session_keys[sender]["aes"] = aes_key
+            self.session_keys[sender]["hmac"] = hmac_key
 
             print(f"[✓] Handshake finalizado com {sender}. AES + HMAC prontos para uso.")
 
         except Exception as e:
-            traceback.print_exc()  # ✅ Adiciona rastreamento completo
-            print(f"[!] Erro ao processar DHE_INIT de {sender}: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"[!] Erro ao processar DHE_RESPONSE de {sender}: {e}")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CLASSE ChatApp - ENGLOBA LÓGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class ChatApp(ctk.CTk):
@@ -425,6 +639,7 @@ class ChatApp(ctk.CTk):
         self.contacts_data = {} # { "user": {"status": "ONLINE", "typing": False, "unread_count": 0} }
         self.chat_histories = {} 
         self.contact_widgets = {}
+        self.contact_public_keys = {}
 
     #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ DESIGN DA UI - Define design da janela, dimensões, temas entre outros ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         self._setup_ui()
@@ -595,25 +810,29 @@ class ChatApp(ctk.CTk):
     def process_incoming_messages(self):
         while not self.incoming_queue.empty():
             try:
-                msg = self.incoming_queue.get_nowait()
-                print("[QUEUE] Mensagem da fila:", repr(msg))
+                msg = self.incoming_queue.get_nowait().strip()
+                #print("[QUEUE] Mensagem da fila:", repr(msg))
+                if not msg:
+                    continue
                 
+                #print("[PROCESSING] Mensagem da fila:", repr(msg))
                 if msg.startswith("CHAT:"):
-                    _, sender, ts, txt = msg.split(":", 3)
-                    self.handle_chat_message(sender, ts, txt)
+                    _, sender, ts, encrypted_payload = msg.split(":", 3)
+                    self.handle_chat_message(sender, ts, encrypted_payload)
+
                 elif msg.startswith("PUBKEY_RESPONSE:"):
                     try:
-                        # print(f"[DEBUG] Mensagem recebida (PUBKEY_RESPONSE): {msg}") ~~~~~~~~~~~ Com esse print podemos ver a chave publica da pessoa em questão no terminal
                         _, target_username, pubkey_b64 = msg.split(":", 2)
                         pubkey_bytes = base64.b64decode(pubkey_b64)
-                        print(f"[+] Recebeu do servidor a chave pública de '{target_username}' (total {len(pubkey_bytes)} bytes).")
+                        print(f"[+] Chave pública de '{target_username}' recebida (total {len(pubkey_bytes)} bytes).")
                         self.store_contact_public_key(target_username, pubkey_bytes)
-                        if self.current_chat_partner == target_username:
-                            print(f"[*] Iniciando handshake com {target_username}")
-                            self.client_logic.initiate_handshake(target_username)
+
+                        print(f"[*] Iniciando handshake com {target_username} (forçado ao receber chave pública)")
+                        self.client_logic.initiate_handshake(target_username)
 
                     except Exception as e:
                         print(f"[!] Erro ao processar chave pública recebida: {e}")
+
 
                 elif msg.startswith("PUBKEY_NOTIFY:"):
                     _, content = msg.split(":", 1)
@@ -632,8 +851,14 @@ class ChatApp(ctk.CTk):
                     _, sender, dh_b64 = msg.split(":", 2)
                     self.client_logic.handle_dhe_init(sender, dh_b64)
                 elif msg.startswith("DHE_RESPONSE:"):
-                    _, sender, b64 = msg.split(":", 2)
-                    self.client_logic.handle_dhe_response(sender, b64)
+                    try:
+                        _, sender, b64 = msg.split(":", 2)
+                        b64 = b64.strip()  # muito importante!
+                        print(f"[DEBUG] handle_dhe_response acionado com {sender}, base64 tamanho={len(b64)}")
+                        self.client_logic.handle_dhe_response(sender, b64)
+                    except Exception as e_inner:
+                        print(f"[!] Erro ao processar DHE_RESPONSE: {e_inner}") 
+
 
                 elif msg.startswith("SYSTEM:"):
                     content = msg.split(":", 1)[1]
@@ -649,6 +874,19 @@ class ChatApp(ctk.CTk):
         self.after(100, self.process_incoming_messages)
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ LOGICA E DESIGN DA UI ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     def handle_chat_message(self, sender, timestamp, text):
+        print("[DEBUG] handle_chat_message acionado para:", sender)
+        if hasattr(self.client_logic, 'session_keys') and sender in self.client_logic.session_keys:
+            session = self.client_logic.session_keys[sender]
+            decrypted_text = decifrar_mensagem(text, session["aes"], session["hmac"])
+
+            if decrypted_text is None:
+                print(f"[ALERTA] Mensagem de {sender} foi descartada (HMAC inválido!)")
+                return  # Não exibe mensagens comprometidas
+
+            text = decrypted_text  # Substitui o texto cifrado pelo texto claro
+        else:
+            print(f"[!] Sessão segura com {sender} não estabelecida. Ignorando mensagem cifrada.")
+            return
         formatted_message = f"[{timestamp}] {sender}: {text}\n"
 
         if sender not in self.chat_histories:
@@ -798,20 +1036,42 @@ class ChatApp(ctk.CTk):
         if not msg_text or not self.current_chat_partner:
             return
 
+        # Verifica se a sessão segura com o contato já está estabelecida
+        if self.current_chat_partner not in self.client_logic.session_keys:
+            print(f"[!] Sessão com {self.current_chat_partner} ainda não estabelecida. Aguarde handshake.")
+            return
+
+        session = self.client_logic.session_keys[self.current_chat_partner]
+
+        # Verifica se as chaves AES e HMAC já foram derivadas (handshake finalizado)
+        if "aes" not in session or "hmac" not in session:
+            print(f"[!] Handshake com {self.current_chat_partner} ainda não finalizado. Aguarde.")
+            return
+
+        # Envia a mensagem cifrada
         self.client_logic.send_message(self.current_chat_partner, msg_text)
-        
+
+        # Exibe a mensagem na interface
         formatted_message = f"[agora] Eu: {msg_text}\n"
-        
         if self.current_chat_partner not in self.chat_histories:
             self.chat_histories[self.current_chat_partner] = ""
         self.chat_histories[self.current_chat_partner] += formatted_message
-        
+
         self.chat_textbox.configure(state="normal")
         self.chat_textbox.insert("end", formatted_message)
         self.chat_textbox.see("end")
         self.chat_textbox.configure(state="disabled")
-        
         self.message_entry.delete(0, "end")
+
+    def process_pending_messages(self, sender):
+        to_process = []
+        for msg in self.message_queue:
+            if f"CHAT:{sender}:" in msg:
+                to_process.append(msg)
+        for msg in to_process:
+            self.message_queue.remove(msg)
+            self.app.process_incoming_message(msg)
+
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Lógica - Função pra armazenar a chave publica dos usuários na memória ~~~~~~~~~~~~~~~~~~~~~~~~
     def store_contact_public_key(self, username, pubkey_bytes):
         if not hasattr(self, 'contact_public_keys'):

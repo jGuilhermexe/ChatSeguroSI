@@ -47,6 +47,7 @@ class Servidor:
         try:
             messages = db.fetch_all_messages(username)
             for sender, ts, txt in messages:
+                print(f"[DEBUG] Enviando histórico: sender={sender}, ts={ts}, txt={txt}")
                 client_socket.send(f"CHAT:{sender}:{ts}:{txt}".encode('utf-8'))
         except Exception as e:
             print(f"[!] Erro ao carregar histórico de {username}: {e}")
@@ -171,15 +172,32 @@ class Servidor:
                 if not data:
                     raise ConnectionResetError()
 
-                if data.startswith("MSG:"):
-                    _, dest, msg = data.split(":", 2)
-                    timestamp = datetime.now().isoformat(timespec='seconds')
-                    db.store_message(dest, client_name, timestamp, msg)
+                elif data.startswith("MSG:"):
+                    try:
+                        # Divide a mensagem em EXATAMENTE 4 partes
+                        parts = data.split(":", 3)  # MSG:dest:timestamp:conteúdo
+                        if len(parts) != 4:
+                            print(f"[ERRO] Formato inválido: {data[:100]}...")
+                            continue
+                            
+                        _, destinatario, timestamp, mensagem_cifrada = parts
+                        
+                        # Remove quaisquer \n extras no final
+                        mensagem_cifrada = mensagem_cifrada.strip()
+                        
+                        print(f"[DEBUG] Mensagem recebida de {client_name} para {destinatario} (ts: {timestamp})")
+                        
+                        # Armazena no banco de dados (sem modificar a mensagem)
+                        db.store_message(destinatario, client_name, timestamp, mensagem_cifrada)
+                        
+                        # Encaminha para o destinatário se estiver online
+                        if destinatario in self.clients:
+                            self.clients[destinatario].send(f"CHAT:{client_name}:{timestamp}:{mensagem_cifrada}\n".encode('utf-8'))
+                            
+                    except Exception as e:
+                        print(f"[ERRO] Falha ao processar MSG: {e}")
 
-                    if dest in self.clients:
-                        self.clients[dest].send(f"CHAT:{client_name}:{timestamp}:{msg}".encode('utf-8'))
-                    else:
-                        client_socket.send(f"SYSTEM:{dest} está offline. Mensagem armazenada.".encode('utf-8'))
+
                 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Função responsável por fazer o intermédio entre as chaves publicas entre A e B ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 elif data.startswith("PUBKEY_REQUEST:"):
                     try:
