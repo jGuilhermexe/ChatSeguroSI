@@ -40,6 +40,8 @@ def cifrar_mensagem(message, aes_key, hmac_key):
     h = hmac.HMAC(hmac_key, hashes.SHA256())
     h.update(iv + ciphertext)
     hmac_value = h.finalize()
+
+    print("\n\n=============================================")
     print("\n[DEBUG - CIFRAR]")
     print("Mensagem original:", message)
     print("IV:", iv.hex())
@@ -47,6 +49,7 @@ def cifrar_mensagem(message, aes_key, hmac_key):
     print("HMAC gerado:", hmac_value.hex())
     print("HMAC key usada:", hmac_key.hex())
     print("AES key usada :", aes_key.hex())
+    print("=============================================")
     # Retorna base64(IV + ciphertext + HMAC)
     return base64.b64encode(iv + ciphertext + hmac_value).decode('utf-8')
 
@@ -59,7 +62,7 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
         print(f"Base64 recebido: {encrypted_b64[:50]}... (tamanho: {len(encrypted_b64)})")
         
         # 1. Pré-processamento do Base64
-        encrypted_b64 = encrypted_b64.strip()
+        encrypted_b64 = encrypted_b64.split(":")[-1]
         print("[DEBUG] Base64 após strip:", repr(encrypted_b64))
         
         # 2. Verificação básica do tamanho
@@ -88,15 +91,17 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
 
         # 6. Extração de IV, ciphertext e HMAC
         iv = raw[:16]
-        ciphertext = raw[16:-32]
-        recv_hmac = raw[-32:]
+        ciphertext = raw[16:-32]  
+        recv_hmac = raw[-32:]    
         
+        print("\n\n=============================================")
         print("[DEBUG - DECIFRAR]")
         print("IV:", iv.hex())
         print("Ciphertext:", ciphertext.hex() if ciphertext else "VAZIO")
         print("HMAC recebido:", recv_hmac.hex())
         print("HMAC key usada:", hmac_key.hex())
         print("AES key usada:", aes_key.hex())
+        print("=============================================")
 
         # 7. Verificação do HMAC
         h = hmac.HMAC(hmac_key, hashes.SHA256())
