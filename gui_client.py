@@ -21,22 +21,25 @@ import traceback
 from datetime import datetime
 
 
-
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GUI_CLIENT.PY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Essa parte do código é responsável pelo design da interface gráfica e também da lógica.
 
-def cifrar_mensagem(message, aes_key, hmac_key):
-    iv = os.urandom(16)
 
-    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
+
+# Função responsável por cifrar as mensagens que são enviadas.
+def cifrar_mensagem(message, aes_key, hmac_key):                    # IV (Initialization Vector): é um número aleatório usado na criptografia para que a mesma mensagem gere resultados diferentes
+    iv = os.urandom(16)                                             # HMAC - é uma "assinatura" que garante que a mensagem não foi alterada nem falsificada
+
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))         #  Cipher - é um objeto/ferramenta da biblioteca que faz a criptografia e descriptografia
     encryptor = cipher.encryptor()
 
     padder = sym_padding.PKCS7(128).padder()
     padded_data = padder.update(message.encode('utf-8')) + padder.finalize()
 
-    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()          # Ciphertext: mensagem já criptografada (texto embaralhado que não dá para ler sem a chave)
 
-    # Calcula HMAC sobre IV + ciphertext
+# Calcula o HMAC (assinatura) para garantir que IV + mensagem criptografada não foram alterados
+
     h = hmac.HMAC(hmac_key, hashes.SHA256())
     h.update(iv + ciphertext)
     hmac_value = h.finalize()
@@ -50,10 +53,12 @@ def cifrar_mensagem(message, aes_key, hmac_key):
     print("HMAC key usada:", hmac_key.hex())
     print("AES key usada :", aes_key.hex())
     print("=============================================")
-    # Retorna base64(IV + ciphertext + HMAC)
+
+    # Retorna tudo junto (IV + mensagem criptografada + HMAC) codificado em base64 para enviar como texto
     return base64.b64encode(iv + ciphertext + hmac_value).decode('utf-8')
 
 
+# Responsável por decifrar as mensagens que foram recebidas.
 def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
     try:
         print("\n[DEBUG DECIFRAR]")
@@ -69,7 +74,9 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
         if len(encrypted_b64) < 44:  # IV(16) + HMAC(32) + mínimo 1 byte de ciphertext
             raise ValueError("Payload cifrado muito curto para ser válido")
 
-        # 3. Adicionar padding se necessário (Base64 deve ter comprimento múltiplo de 4)
+        # 3. Função para adicionar um padding pra preencher as mensagens com bytes extra, antes dela ser criptografada
+        # Esse padding tem que ser múltiplo de 4.
+
         padding_needed = len(encrypted_b64) % 4
         if padding_needed:
             print(f"[DEBUG] Adicionando {4-padding_needed} caracteres de padding")
@@ -89,7 +96,7 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
         if len(raw) < 48:  # IV(16) + HMAC(32)
             raise ValueError("Dados decodificados insuficientes")
 
-        # 6. Extração de IV, ciphertext e HMAC
+        # 6. Extração do IV, ciphertext e HMAC
         iv = raw[:16]
         ciphertext = raw[16:-32]  
         recv_hmac = raw[-32:]    
@@ -103,7 +110,7 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
         print("AES key usada:", aes_key.hex())
         print("=============================================")
 
-        # 7. Verificação do HMAC
+        # 7. Verificação para ver se o HMAC que chegou está correto, se estiver incorreto, implica dizer que houve manipulação nas mensagens.
         h = hmac.HMAC(hmac_key, hashes.SHA256())
         h.update(iv + ciphertext)
         expected_hmac = h.finalize()
@@ -114,7 +121,7 @@ def decifrar_mensagem(encrypted_b64, aes_key, hmac_key):
             print("[!!!] HMAC inválido - possível manipulação da mensagem!")
             raise ValueError("Falha na verificação de integridade (HMAC)")
 
-        # 8. Decifração AES
+        # 8. Função responsável pela decifração usando AES
         cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
         decryptor = cipher.decryptor()
         
@@ -196,6 +203,7 @@ class ChatClient:
         self.sock = socket(AF_INET, SOCK_STREAM)
         self.app = app_controller
         self.buffer = ""
+        self.pending_messages = {}  # {recipient: mensagem_pendente}
         self.COMMAND_PREFIXES = ["CHAT:", "TYPING:", "STATUS:", "CONTACTS:", "SYSTEM:", "PUBKEY_RESPONSE:", "PUBKEY_NOTIFY:", "DHE_INIT:", "DHE_RESPONSE:"]
 
 
@@ -272,8 +280,30 @@ class ChatClient:
 
             if recipient not in self.session_keys:
                 print(f"[!] Nenhuma sessão estabelecida com {recipient}. Iniciando handshake...")
+                self.pending_messages[recipient] = message
                 self.initiate_handshake(recipient)
                 return
+
+            # ~~~~~~~~~~~~~ GERENCIAMENTO DE EXPIRAÇÃO DE SESSÃO ~~~~~~~~~~~~~
+
+            session = self.session_keys[recipient]  # Obtém a sessão ativa com o destinatário
+            agora = datetime.now()                  # Captura o tempo atual
+            tempo = agora - session.get("timestamp", agora)  # Calcula o tempo decorrido desde o início da sessão
+            msg_count = session.get("msg_count", 0) # Recupera o número de mensagens trocadas nesta sessão
+
+            # Verifica se algum dos critérios de expiração foi atingido
+            if msg_count >= 5 or tempo.total_seconds() >= 360:  # Altere 5 e 360 para 100 e 3600 (60min) no futuro
+                motivo = "mensagens" if msg_count >= 5 else "tempo"  # Decide o motivo da expiração
+
+                # Imprime uma seção destacada no terminal para facilitar a visualização
+                print("\n" + "="*60)
+                print(f"[!] Sessão com {recipient} expirada por limite de {motivo}. Reiniciando handshake.")
+                print("="*60 + "\n")
+
+                del self.session_keys[recipient]           # Remove a sessão antiga (obrigatório para forçar novo handshake)
+                self.pending_messages[recipient] = message # Armazena a mensagem que estava sendo enviada no momento
+                self.initiate_handshake(recipient)         # Reinicia o processo de Handshake criptográfico (DHE + Salt + HKDF)
+                return                                     # Encerra a função para aguardar nova sessão ser criada
 
             session = self.session_keys[recipient]
             
@@ -286,7 +316,7 @@ class ChatClient:
                     self.initiate_handshake(recipient)
                 return
 
-            # Remove quebras de linha e espaços extras da mensagem
+            # Remove quebras de linha e espaços extras da mensagem, sim, isso deu muita dor de cabeça
             message = message.strip()
             if not message:
                 print("[!] Mensagem vazia ignorada.")
@@ -307,6 +337,10 @@ class ChatClient:
             try:
                 self.sock.sendall(protocol_message.encode('utf-8'))
                 print(f"[✓] Mensagem para {recipient} enviada com sucesso.")
+                # Incrementa contador de mensagens na sessão
+                session["msg_count"] += 1
+                print(f"[SESSION] Mensagens trocadas com {recipient}: {session['msg_count']}")
+
             except Exception as send_error:
                 print(f"[!] Erro ao enviar mensagem para {recipient}: {send_error}")
                 # Tenta reconectar se houver erro de conexão
@@ -387,6 +421,7 @@ class ChatClient:
         except Exception as e:
             print(f"[!] Erro ao pedir chave pública: {e}")
 
+# Função responsável por iniciar o HandShake
     def initiate_handshake(self, recipient):
         """Inicia o Handshake com Diffie-Hellman"""
         if recipient in self.session_keys and "aes" in self.session_keys[recipient]:
@@ -394,7 +429,7 @@ class ChatClient:
             return
         
         try:
-            # Gera o par efêmero DH
+            # Gera a chave Diffie-Hellman efêmera
             print(f"[DEBUG] Gerando chave DH efêmera...")
             self.dh_private_key, dh_public_bytes = generate_dh_key_pair()
             print(f"[DEBUG] Tamanho da chave DH pública gerada: {len(dh_public_bytes)} bytes")
@@ -546,6 +581,10 @@ class ChatClient:
             self.session_keys[sender]["salt"] = salt
             self.session_keys[sender]["aes"] = aes_key
             self.session_keys[sender]["hmac"] = hmac_key
+            self.session_keys[sender]["timestamp"] = datetime.now()
+            self.session_keys[sender]["msg_count"] = 0
+            print(f"[HANDSHAKE] Nova sessão iniciada com {sender}. Timestamp: {self.session_keys[sender]['timestamp']}")
+
 
         except Exception as e:
             print(f"[!] Erro ao processar DHE_INIT de {sender}: {e}")
@@ -619,8 +658,15 @@ class ChatClient:
             # Salva as chaves derivadas
             self.session_keys[sender]["aes"] = aes_key
             self.session_keys[sender]["hmac"] = hmac_key
-
+            self.session_keys[sender]["timestamp"] = datetime.now()
+            self.session_keys[sender]["msg_count"] = 0
             print(f"[✓] Handshake finalizado com {sender}. AES + HMAC prontos para uso.")
+            print(f"[HANDSHAKE] Nova sessão iniciada com {sender}. Timestamp: {self.session_keys[sender]['timestamp']}")   
+            if sender in self.pending_messages:
+                pending = self.pending_messages.pop(sender)
+                print(f"[DEBUG] Enviando mensagem pendente para {sender}: {pending}")
+                self.send_message(sender, pending)
+
 
         except Exception as e:
             import traceback
@@ -855,10 +901,10 @@ class ChatApp(ctk.CTk):
                 elif msg.startswith("DHE_INIT:"):
                     _, sender, dh_b64 = msg.split(":", 2)
                     self.client_logic.handle_dhe_init(sender, dh_b64)
-                elif msg.startswith("DHE_RESPONSE:"):
+                elif msg.startswith("DHE_RESPONSE:"):       # Deu muita dor de cabeça, pois o DHE_Response não estava sendo acionado de forma alguma
                     try:
                         _, sender, b64 = msg.split(":", 2)
-                        b64 = b64.strip()  # muito importante!
+                        b64 = b64.strip()  
                         print(f"[DEBUG] handle_dhe_response acionado com {sender}, base64 tamanho={len(b64)}")
                         self.client_logic.handle_dhe_response(sender, b64)
                     except Exception as e_inner:
@@ -907,6 +953,9 @@ class ChatApp(ctk.CTk):
                 self.chat_textbox.insert("end", formatted_message)
                 self.chat_textbox.see("end")
                 self.chat_textbox.configure(state="disabled")
+            if sender in self.client_logic.session_keys:
+                self.client_logic.session_keys[sender]["msg_count"] += 1
+                print(f"[SESSION] Mensagens trocadas com {sender}: {self.client_logic.session_keys[sender]['msg_count']}")
             else:
                 self.contacts_data[sender]['unread_count'] += 1
                 self.update_unread_badge(sender)
