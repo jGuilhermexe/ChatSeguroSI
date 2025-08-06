@@ -15,7 +15,7 @@ def init_db():
         cur.execute(
             """CREATE TABLE IF NOT EXISTS users (
                    username TEXT PRIMARY KEY,
-                   public_key BLOB  
+                   public_key BLOB
                )"""
         )
         conn.commit()
@@ -29,7 +29,8 @@ def add_user(username: str, public_key: bytes):
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender     TEXT    NOT NULL,
                 timestamp  TEXT    NOT NULL,
-                text       TEXT    NOT NULL
+                text       TEXT    NOT NULL,
+                is_offline INTEGER DEFAULT 0
             )
         """)
         conn.commit()
@@ -45,22 +46,21 @@ def list_users() -> list[str]:
 def store_offline(sender: str, recipient: str, text: str):
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(f"""
-            print(f"[DEBUG] store_offline: text={text}")
-            INSERT INTO messages_{recipient} (sender, timestamp, text)
-            VALUES (?, ?, ?)
+            INSERT INTO messages_{recipient} (sender, timestamp, text, is_offline)
+            VALUES (?, ?, ?, 1)
         """, (sender, datetime.now().isoformat(timespec="seconds"), text))
         conn.commit()
 
 def fetch_offline(recipient: str) -> list[tuple[str, str, str]]:
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute(f"""
-            SELECT id, sender, timestamp, text FROM messages_{recipient} ORDER BY id
+            SELECT id, sender, timestamp, text FROM messages_{recipient} WHERE is_offline = 1 ORDER BY id
         """)
         rows = cur.fetchall()
         ids = [row[0] for row in rows]
         if ids:
             cur.execute(f"""
-                DELETE FROM messages_{recipient} WHERE id IN ({','.join('?'*len(ids))})
+                UPDATE messages_{recipient} SET is_offline = 0 WHERE id IN ({','.join('?'*len(ids))})
             """, ids)
             conn.commit()
         return [(row[1], row[2], row[3]) for row in rows]
@@ -85,9 +85,14 @@ def fetch_all_messages(recipient: str) -> list[tuple[str, str, str]]:
             SELECT sender, timestamp, text FROM messages_{recipient} ORDER BY id
         """)
         return cur.fetchall()
-    
+
 def get_public_key(username: str) -> bytes:
     with _get_conn() as conn, closing(conn.cursor()) as cur:
         cur.execute("SELECT public_key FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
         return row[0] if row else None
+# Adicionando uma nova função para salvar a chave pública no DB local
+def store_public_key(username: str, public_key: bytes):
+    with _get_conn() as conn, closing(conn.cursor()) as cur:
+        cur.execute("UPDATE users SET public_key = ? WHERE username = ?", (public_key, username))
+        conn.commit()
