@@ -292,10 +292,9 @@ class ChatClient:
             msg_count = session.get("msg_count", 0) # Recupera o número de mensagens trocadas nesta sessão
 
             # Verifica se algum dos critérios de expiração foi atingido
-            if msg_count >= 5 or tempo.total_seconds() >= 360:  # Altere 5 e 360 para 100 e 3600 (60min) no futuro
+            if msg_count >= 5 or tempo.total_seconds() >= 360:                      # Alterar após apresentação 5 e 360 para 100 e 3600 (60min) no futuro
                 motivo = "mensagens" if msg_count >= 5 else "tempo"  # Decide o motivo da expiração
 
-                # Imprime uma seção destacada no terminal para facilitar a visualização
                 print("\n" + "="*60)
                 print(f"[!] Sessão com {recipient} expirada por limite de {motivo}. Reiniciando handshake.")
                 print("="*60 + "\n")
